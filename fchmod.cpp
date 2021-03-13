@@ -118,6 +118,18 @@ typedef struct _OBJECT_NAME_INFORMATION FAR *LPOBJECT_NAME_INFORMATION;
 #define FILE_NAME_OPENED 0x8
 #endif
 
+#ifndef VER_PLATFORM_WIN32s
+#define VER_PLATFORM_WIN32s 0
+#endif
+
+#ifndef VER_PLATFORM_WIN32_WINDOWS
+#define VER_PLATFORM_WIN32_WINDOWS 1
+#endif
+
+#ifndef VER_PLATFORM_WIN32_NT
+#define VER_PLATFORM_WIN32_NT 2
+#endif
+
 // CompareString and CompareStringW are undefined on NT 3.1
 #ifndef CompareString
 	#ifdef  UNICODE
@@ -269,6 +281,8 @@ typedef LOSVERSIONINFOW FAR * LPLRTL_OSVERSIONINFOW;
 
 #pragma pack(1) 
 
+typedef HANDLE LHTASK;
+
 typedef struct _MODREF 
 { 
     struct _MODREF *pNextModRef;    // 00h 
@@ -355,7 +369,7 @@ typedef struct _PDB95 {                 // Size = 0xC0 (from Kernel32)
     WORD    Unknown3;                   //30 (always 0) 
     WORD    cRing0Threads;              //32 Number of ring 0 threads 
     HANDLE  HeapHandle;                 //34 Heap to allocate handle tables out of (this seems to always be the KERNEL32 heap) 
-    HTASK   W16TDB;                     //38 Win16 Task Database selector 
+    LHTASK   W16TDB;                     //38 Win16 Task Database selector 
     DWORD   MemMapFiles;                //3C Pointer to memory mapped file list 
     PEDB    pEDB;                       //40 Pointer to Environment Database 
     PHANDLE_TABLE pHandleTable;         //44 Pointer to process handle table 
@@ -3639,4 +3653,3 @@ int fchmod(int fd, int mode)
 		}
 	}
 }
-
