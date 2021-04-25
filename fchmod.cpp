@@ -70,10 +70,21 @@ typedef struct _OBJECT_NAME_INFORMATION FAR *LPOBJECT_NAME_INFORMATION;
 #define MIN(A, B) (((A) < (B)) ? (A) : (B))
 #endif
 
+#if _MSC_VER
 #define NAKED __declspec(naked)
+#else
+//#define NAKED __attribute__ ((naked)) 
+//#define NAKED __declspec(naked)
+#define NAKED 
+#if __GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1)
+#define INTERRUPT __attribute__ ((interrupt))
+struct interrupt_frame;
+#endif
+#endif
 
 #define GetVxDServiceOrdinal(service)   service
 
+#ifdef _MSC_VER
 #define VxDCall(service) \
     _asm _emit 0xcd \
     _asm _emit 0x20 \
@@ -89,6 +100,33 @@ typedef struct _OBJECT_NAME_INFORMATION FAR *LPOBJECT_NAME_INFORMATION;
     _asm _emit ((GetVxDServiceOrdinal(service) >> 8) & 0xff) | 0x80 \
     _asm _emit (GetVxDServiceOrdinal(service) >> 16) & 0xff \
     _asm _emit (GetVxDServiceOrdinal(service) >> 24) & 0xff \
+	
+#else
+
+#define VxDStringifyX(X) #X
+#define VxDStringify(X) VxDStringifyX(X)
+
+#define VxDCall(service) \
+    __asm__ volatile(\
+		".byte 0xcd\n\t" \
+		".byte 0x20\n\t" \
+		".byte (" VxDStringify(GetVxDServiceOrdinal(service)) " & 0xff)\n\t" \
+		".byte (" VxDStringify(GetVxDServiceOrdinal(service)) " >> 8) & 0xff\n\t" \
+		".byte (" VxDStringify(GetVxDServiceOrdinal(service)) " >> 16) & 0xff\n\t" \
+		".byte (" VxDStringify(GetVxDServiceOrdinal(service)) " >> 24) & 0xff\n\t" \
+	)
+
+#define VxDJmp(service) \
+    __asm__ volatile(\
+		".byte 0xcd\n\t" \
+		".byte 0x20\n\t" \
+		".byte (" VxDStringify(GetVxDServiceOrdinal(service)) " & 0xff)\n\t" \
+		".byte ((" VxDStringify(GetVxDServiceOrdinal(service)) " >> 8) & 0xff) | 0x80\n\t" \
+		".byte (" VxDStringify(GetVxDServiceOrdinal(service)) " >> 16) & 0xff\n\t" \
+		".byte (" VxDStringify(GetVxDServiceOrdinal(service)) " >> 24) & 0xff\n\t" \
+	)
+	
+#endif
 
 #ifndef MAKEDWORD
 #define MAKEDWORD(a, b)      ((DWORD)(((WORD)(a)) | ((DWORD)((WORD)(b))) << 16))
@@ -977,7 +1015,9 @@ typedef BOOL (WINAPI FAR *LPGetVersionEXEXA)(LPLOSVERSIONINFOEXA lpVersionInform
 typedef unsigned short *string_t;	/* character string */
 typedef unsigned short sfn_t;		/* system file number */
 typedef unsigned long pos_t;		/* file position */
+#if defined(_MSC_VER)
 typedef unsigned int pid_t;			/* process ID of requesting task */
+#endif
 typedef void FAR *ubuffer_t;		/* ptr to user data buffer */
 typedef unsigned char uid_t;		/* user ID for this request */
 
@@ -1294,7 +1334,12 @@ typedef	pIFSFileHookFunc	*ppIFSFileHookFunc;
 
 #define Interrupt 5 /* interrupt 3 will make debugging more difficult */
 
+#if defined _MSC_VER
 #pragma optimize("", off)
+#else
+#pragma GCC push_options
+#pragma GCC optimize ("O0")
+#endif
 #if defined _MSC_VER
 	#if _MSC_VER >= 1400
 #include <intrin.h>
@@ -1338,9 +1383,9 @@ PTIB getTIB(VOID)
 	register PTIB pTIB;
 
 #if defined(__X86_64__) || defined(__amd64__)
-	__asm__("movq %%gs:0x30, %0" : "=r" (pTIB));
+	__asm__ volatile ("movq %%gs:0x30, %0" : "=r" (pTIB));
 #elif defined(__i386__)
-	__asm__("movl %%fs:0x18, %0" : "=r" (pTIB));
+	__asm__ volatile ("movl %%fs:0x18, %0" : "=r" (pTIB));
 #else
 #error unsupported architecture
 #endif
@@ -1360,30 +1405,62 @@ typedef	pIFSFileHookFunc	*ppIFSFileHookFunc;
 static ppIFSFileHookFunc IFSMgr_InstallFileSystemApiHook(pIFSFileHookFunc func)
 {
 	ppIFSFileHookFunc r = NULL;
+	#ifdef _MSC_VER
 	_asm {
 		mov eax, func
 		push eax
 	};
+	#else
+	__asm__ volatile (
+		"movl %0, %%eax\n\t"
+		"pushl %%eax\n\t"
+		: : "m" (func)
+	);
+	#endif
 	VxDCall(0x00400067);
+	#ifdef _MSC_VER
 	_asm {
 		pop ecx
 		mov r, eax
 	};
+	#else
+	__asm__ volatile (
+		"popl %%ecx\n\t"
+		"movl %%eax, %0\n\t"
+		: "=m" (r)
+	);
+	#endif
 	return r;
 }
 
 static ppIFSFileHookFunc IFSMgr_RemoveFileSystemApiHook(pIFSFileHookFunc func)
 {
 	ppIFSFileHookFunc r = NULL;
+	#ifdef _MSC_VER
 	_asm {
 		mov eax, func
 		push eax
 	};
+	#else
+	__asm__ volatile (
+		"movl %0, %%eax\n\t"
+		"pushl %%eax\n\t"
+		: : "m" (func)
+	);
+	#endif
 	VxDCall(0x00400068);
+	#ifdef _MSC_VER
 	_asm {
 		pop ecx
 		mov r, eax
 	};
+	#else
+	__asm__ volatile (
+		"popl %%ecx\n\t"
+		"movl %%eax, %0\n\t"
+		: "=m" (r)
+	);
+	#endif
 	return r;
 }
 
@@ -1391,28 +1468,58 @@ static ppIFSFileHookFunc IFSMgr_RemoveFileSystemApiHook(pIFSFileHookFunc func)
 static LPVOID IFSMgr_GetHeap(DWORD allocSize)
 {
 	LPVOID r = NULL;
+	#ifdef _MSC_VER
 	_asm {
 		mov eax, allocSize
 		push eax
 	};
+	#else
+	__asm__ volatile (
+		"movl %0, %%eax\n\t"
+		"pushl %%eax\n\t"
+		: : "m" (allocSize)
+	);
+	#endif
 	VxDCall(0x0040000D);
+	#ifdef _MSC_VER
 	_asm {
 		pop ecx
 		mov r, eax
 	};
+	#else
+	__asm__ volatile (
+		"popl %%ecx\n\t"
+		"movl %%eax, %0\n\t"
+		: "=m" (r)
+	);
+	#endif
 	return r;
 }
 
 static void IFSMgr_RetHeap(LPVOID pMemPtr)
 {
+	#ifdef _MSC_VER
 	_asm {
 		mov eax, pMemPtr
 		push eax
 	};
+	#else
+	__asm__ volatile (
+		"movl %0, %%eax\n\t"
+		"pushl %%eax\n\t"
+		: : "m" (pMemPtr)
+	);
+	#endif
 	VxDCall(0x0040000E);
+	#ifdef _MSC_VER
 	_asm {
 		pop ecx
 	}
+	#else
+	__asm__ volatile (
+		"popl %ecx\n\t"
+	);
+	#endif
 	return;
 }
 
@@ -1420,11 +1527,22 @@ static BOOL IFSMgr_Win32_Get_Ring0_Handle(DWORD handle, PVOID *pHandleBuf, PDWOR
 {
 	BOOL r = FALSE;
 
+	#ifdef _MSC_VER
 	_asm {
 		mov eax, handle
 		mov ebx, eax
 	}
+	#else
+	__asm__ volatile (
+		"movl %0, %%eax\n\t"
+		"movl %%eax, %%ebx\n\t"
+		: 
+		: "m" (handle)
+		: "eax", "ebx"
+	);
+	#endif
 	VxDCall(0x00400033);
+	#ifdef _MSC_VER
 	_asm {
 		mov eax, pHandleBuf
 		mov [eax], ebx
@@ -1434,6 +1552,18 @@ static BOOL IFSMgr_Win32_Get_Ring0_Handle(DWORD handle, PVOID *pHandleBuf, PDWOR
 		and eax, 1
 		mov r, eax
 	}
+	#else
+	__asm__ volatile (
+		"movl %0, %%eax\n\t"
+		"movl %%ebx, (%%eax)\n\t"
+		"movl %1, %%eax\n\t"
+		"movl %%edx, (%%eax)\n\t"
+		"setnbb %%al\n\t"
+		"andl $1, %%eax\n\t" 
+		"movl %%eax, %2\n\t" 
+		: "+m" (pHandleBuf), "+m" (pFilePos), "=m" (r) : : "eax"
+	);
+	#endif
 
 	return r;
 }
@@ -1510,8 +1640,16 @@ static int	_cdecl getPathAscii( pIFSFunc pfn, int fn, int Drive, int ResType, in
 	DWORD outBufSize;
 	DWORD outBufStart;
 
+	#ifdef _MSC_VER
 	_asm mov eax, 0x00000000
 	_asm mov pData, eax
+	#else
+	__asm__ volatile (
+		"movl $0, %%eax\n\t"
+		"movl %%eax, %0\n\t"
+		: "=m" (pData)
+	);
+	#endif
 
 	pOldFunc = &pData->oldFunc;
 	pCalled = &pData->called;
@@ -1576,12 +1714,23 @@ static int	_cdecl getPathAscii( pIFSFunc pfn, int fn, int Drive, int ResType, in
 				}
 				pOutBuf = &pData->out[outBufStart];
 
+				#ifdef _MSC_VER
 				_asm push CodePage
 				_asm push outBufSize
 				_asm push pp_elements
 				_asm push pOutBuf
+				#else
+				__asm__ volatile( 
+					"pushl %0\n\t"
+					"pushl %1\n\t"
+					"pushl %2\n\t"
+					"pushl %3\n\t"
+					: : "m" (CodePage), "m" (outBufSize), "m" (pp_elements), "m" (pOutBuf)
+				);
+				#endif
 				
 				VxDCall(0x00400041);
+				#ifdef _MSC_VER
 				_asm mov ecx, pUnitobcsResult
 				_asm mov [ecx], eax
 				_asm mov [ecx + 4], edx
@@ -1590,6 +1739,19 @@ static int	_cdecl getPathAscii( pIFSFunc pfn, int fn, int Drive, int ResType, in
 				_asm pop eax
 				_asm pop eax
 				_asm pop eax
+				#else
+				__asm__ volatile( 
+					"movl %0, %%ecx\n\t"
+					"movl %%eax, (%%ecx)\n\t"
+					"movl %%edx, 4(%%ecx)\n\t"
+
+					"popl %%eax\n\t"
+					"popl %%eax\n\t"
+					"popl %%eax\n\t"
+					"popl %%eax\n\t"
+					: "+m" (pUnitobcsResult)
+				);
+				#endif
 
 				pData->out[outBufStart + unitobcsResult.ddLower] = 0;
 				outBufStart = outBufStart + unitobcsResult.ddLower;
@@ -1641,12 +1803,23 @@ static int	_cdecl getPathAscii( pIFSFunc pfn, int fn, int Drive, int ResType, in
 				pOutBuf = &pData->out[outBufStart];
 			}
 
+			#ifdef _MSC_VER
 			_asm push CodePage
 			_asm push outBufSize
 			_asm push pp_elements
 			_asm push pOutBuf
+			#else
+			__asm__ volatile (
+				"pushl %0\n\t"
+				"pushl %1\n\t"
+				"pushl %2\n\t"
+				"pushl %3\n\t"
+				: : "m" (CodePage), "m" (outBufSize), "m" (pp_elements), "m" (pOutBuf)
+			);
+			#endif
 			
 			VxDCall(0x00400041);
+			#ifdef _MSC_VER
 			_asm mov ecx, pUnitobcsResult
 			_asm mov [ecx], eax
 			_asm mov [ecx + 4], edx
@@ -1655,6 +1828,19 @@ static int	_cdecl getPathAscii( pIFSFunc pfn, int fn, int Drive, int ResType, in
 			_asm pop eax
 			_asm pop eax
 			_asm pop eax
+			#else
+			__asm__ volatile (
+				"movl %0, %%ecx\n\t"
+				"movl %%eax, (%%ecx)\n\t"
+				"movl %%edx, 4(%%ecx)\n\t"
+
+				"popl %%eax\n\t"
+				"popl %%eax\n\t"
+				"popl %%eax\n\t"
+				"popl %%eax\n\t"
+				: "+m" (pUnitobcsResult)
+			);
+			#endif
 
 			pData->out[outBufStart + unitobcsResult.ddLower ] = 0;
 
@@ -1669,6 +1855,7 @@ static int	_cdecl getPathAscii( pIFSFunc pfn, int fn, int Drive, int ResType, in
 	{
 		*pCalled = 1;
 
+		#ifdef _MSC_VER
 		_asm mov eax, pDataBuf
 		_asm mov esi, [eax]
 		_asm mov eax, pHandleBuf
@@ -1676,6 +1863,18 @@ static int	_cdecl getPathAscii( pIFSFunc pfn, int fn, int Drive, int ResType, in
 		_asm mov ecx, 4
 		_asm mov edx, 0
 		_asm mov eax, 0x0D602
+		#else
+		__asm__ volatile (
+			"movl %0, %%eax\n\t"
+			"movl (%%eax), %%esi\n\t"
+			"movl %1, %%eax\n\t"
+			"movl (%%eax), %%ebx\n\t"
+			"movl $4, %%ecx\n\t"
+			"movl $0, %%edx\n\t"
+			"movl $0x0D602, %%eax\n\t"
+			: : "m" (pDataBuf), "m" (pHandleBuf)
+		);
+		#endif
 		
 		VxDCall(0x00400032);
 	}
@@ -1715,12 +1914,22 @@ static int	_cdecl getPathAsciiOffsets( pIFSFunc pfn, int fn, int Drive, int ResT
 	DWORD outBufSize;
 	DWORD outBufStart;
 
+	#ifdef _MSC_VER
 ldPData:
 	_asm mov eax, 0x00000000
 	_asm mov pData, eax
 
 	_asm mov eax, offset ldPData
 	_asm mov offLdPData, eax
+	#else
+	__asm__ volatile (
+		"ldPData:\n\t"
+		"movl $0x00000000, %%eax\n\t"
+		"movl %%eax, %0\n\t"
+		"movl $ldPData, %%eax\n\t"
+		"movl %%eax, %1\n\t"
+		: "=m"(pData), "=m"(offLdPData) );
+	#endif
 
 	offLdPData -= (DWORD)getPathAsciiOffsets;
 
@@ -1762,8 +1971,16 @@ struct ParsedPath {
 	struct PathElement pp_elements[1];
 };*/
 
+	#ifdef _MSC_VER
 	_asm mov eax, 0x00000000
 	_asm mov pUnicodeData, eax
+	#else
+	__asm__ volatile (
+		"movl $0x00000000, %%eax\n\t"
+		"movl %%eax, %0\n\t"
+		: "=m" (pUnicodeData)
+	);
+	#endif
 
 	pOldFunc = &pUnicodeData->oldFunc;
 	pCalled = &pUnicodeData->called;
@@ -1946,6 +2163,7 @@ struct ParsedPath {
 	{
 		*pCalled = 1;
 
+		#ifdef _MSC_VER
 		_asm mov eax, pDataBuf
 		_asm mov esi, [eax]
 		_asm mov eax, pHandleBuf
@@ -1953,6 +2171,18 @@ struct ParsedPath {
 		_asm mov ecx, 4
 		_asm mov edx, 0
 		_asm mov eax, 0x0D602
+		#else
+		__asm__ volatile (
+			"movl %0, %%eax\n\t"
+			"movl (%%eax), %%esi\n\t"
+			"movl %1, %%eax\n\t"
+			"movl (%%eax), %%ebx\n\t"
+			"movl $4, %%ecx\n\t"
+			"movl $0, %%edx\n\t"
+			"movl $0x0D602, %%eax\n\t"
+			: : "m"(pDataBuf), "m"(pHandleBuf)
+		);
+		#endif
 		
 		VxDCall(0x00400032);
 	}
@@ -1990,12 +2220,24 @@ static int	_cdecl getPathUnicodeOffsets( pIFSFunc pfn, int fn, int Drive, int Re
 	struct PathElement *pp_element;
 	LPVOID parsedPathEnd;
 
+	#if _MSC_VER
 ldPData:
 	_asm mov eax, 0x00000000
 	_asm mov pUnicodeData, eax
 
 	_asm mov eax, offset ldPData
 	_asm mov offLdPData, eax
+	#else
+	__asm__ volatile (
+		"lpPData:\n\t"
+		"movl $0x00000000, %%eax\n\t"
+		"movl %%eax, %0\n\t"
+
+		"movl $lpPData, %%eax\n\t"
+		"movl %%eax, %1\n\t"
+		: "=m"(pUnicodeData), "=m"(offLdPData)
+	);
+	#endif
 
 	offLdPData -= (DWORD)getPathUnicodeOffsets;
 
@@ -2006,9 +2248,20 @@ ldPData:
 static PDWORD ring0ExtendedHandleToInfoPHandle;
 static LPVOID ring0FileIOBuf = NULL;
 
+#if _MSC_VER
 NAKED void WINAPI ring0InstallIFSHookAscii(void)
+#elif (__GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1))
+INTERRUPT void WINAPI ring0InstallIFSHookAscii(struct interrupt_frame *frame)
+#else
+void WINAPI ring0InstallIFSHookAscii(void)
+#endif
 {
+	#ifdef _MSC_VER
 	_asm pushad
+	#elif __GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1)
+	#else
+	__asm__("pushal\n\t");
+	#endif
 
 	sizeofGetPathAscii = (DWORD)getPathAsciiEnd - (DWORD)getPathAscii;
 
@@ -2032,18 +2285,47 @@ NAKED void WINAPI ring0InstallIFSHookAscii(void)
 		pData->error = FALSE;
 		pData->handleBuf = fileSystemApiHandle;
 
+		#if _MSC_VER
 		_asm jmp short $+2
+		#else
+		__asm__ volatile(
+			"jmp rel1\n\t"
+			"rel1:\n\t"
+		);
+		#endif
 
 		pData->oldFunc = (ppIFSFileHookFunc)IFSMgr_InstallFileSystemApiHook((pIFSFileHookFunc)memBlock);
 	}
 
+	#if _MSC_VER
 	_asm popad
 	_asm iretd
+	#elif __GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1)
+	#else
+	__asm__ volatile(
+		"popal\n\t"
+		"add $0x24, %esp\n\t"
+		"pop %ebx\n\t"
+		"pop %ebp\n\t"
+		"iret\n\t"
+	);
+	#endif
 }
 
+#if _MSC_VER
 NAKED void WINAPI ring0UninstallIFSFileHookAscii(void)
+#elif (__GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1))
+INTERRUPT void WINAPI ring0UninstallIFSFileHookAscii(struct interrupt_frame *frame)
+#else
+void WINAPI ring0UninstallIFSFileHookAscii(void)
+#endif
 {
+	#if _MSC_VER
 	_asm pushad
+	#elif __GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1)
+	#else
+	__asm__ volatile("pushal\n\t");
+	#endif
 
 	if(pData->oldFunc && memBlock)
 	{
@@ -2055,13 +2337,34 @@ NAKED void WINAPI ring0UninstallIFSFileHookAscii(void)
 		IFSMgr_RetHeap(memBlock);
 	}
 
+	#if _MSC_VER
 	_asm popad
 	_asm iretd
+	#elif __GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1)
+	#else
+	__asm__ volatile(
+		"popal\n\t"
+		"add $0x4, %esp\n\t"
+		"pop %ebp\n\t"
+		"iret\n\t"
+	);
+	#endif
 }
 
+#if _MSC_VER
 NAKED void WINAPI ring0InstallIFSHookUnicode(void)
+#elif (__GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1))
+INTERRUPT void WINAPI ring0InstallIFSHookUnicode(struct interrupt_frame *frame)
+#else
+void WINAPI ring0InstallIFSHookUnicode(void)
+#endif
 {
+	#if _MSC_VER
 	_asm pushad
+	#elif __GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1)
+	#else
+	__asm__ volatile("pushal\n\t");
+	#endif
 
 	sizeofGetPathUnicode = (DWORD)getPathUnicodeEnd - (DWORD)getPathUnicode;
 
@@ -2085,18 +2388,47 @@ NAKED void WINAPI ring0InstallIFSHookUnicode(void)
 		pUnicodeData->error = FALSE;
 		pUnicodeData->handleBuf = fileSystemApiHandle;
 
+		#if _MSC_VER
 		_asm jmp short $+2
+		#else
+		__asm__ volatile(
+			"jmp rel2\n\t"
+			"rel2:\n\t"
+		);
+		#endif
 
 		pUnicodeData->oldFunc = (ppIFSFileHookFunc)IFSMgr_InstallFileSystemApiHook((pIFSFileHookFunc)memBlock);
 	}
 
+	#if _MSC_VER
 	_asm popad
 	_asm iretd
+	#elif __GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1)
+	#else
+	__asm__ volatile (
+		"popal\n\t"
+		"add $0x24, %esp\n\t"
+		"pop %ebx\n\t"
+		"pop %ebp\n\t"
+		"iret\n\t"
+	);
+	#endif
 }
 
+#if _MSC_VER
 NAKED void WINAPI ring0UninstallIFSFileHookUnicode(void)
+#elif (__GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1))
+INTERRUPT void WINAPI ring0UninstallIFSFileHookUnicode(struct interrupt_frame *frame)
+#else
+void WINAPI ring0UninstallIFSFileHookUnicode(void)
+#endif
 {
+	#if _MSC_VER
 	_asm pushad
+	#elif (__GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1))
+	#else
+	__asm__ volatile("pushal");
+	#endif
 
 	if(pUnicodeData->oldFunc && memBlock)
 	{
@@ -2108,23 +2440,59 @@ NAKED void WINAPI ring0UninstallIFSFileHookUnicode(void)
 		IFSMgr_RetHeap(memBlock);
 	}
 
+	#if _MSC_VER
 	_asm popad
 	_asm iretd
+	#elif (__GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1))
+	#else
+	__asm__(
+		"popal\n\t"
+		"add $0x4, %esp\n\t"
+		"pop %ebp\n\t"
+		"iret\n\t"
+	);
+	#endif
 }
 
+#if _MSC_VER
 static NAKED void WINAPI getRing0HandleHook(void)
+#elif (__GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1))
+static INTERRUPT void WINAPI getRing0HandleHook(struct interrupt_frame *frame)
+#else
+static void WINAPI getRing0HandleHook(void)
+#endif
 {
+	#if _MSC_VER
 	_asm pushad
+	#elif (__GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1))
+	#else
+	__asm__("pushal");
+	#endif
 
 	*getRing0HandleHookRet = IFSMgr_Win32_Get_Ring0_Handle(*getRing0HandleHookExtendedFileHandle, getRing0HandleHookpHandleBuf, getRing0HandleHookpFilePos);
 
+	#if _MSC_VER
 	_asm popad
 	_asm iretd
+	#elif (__GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1))
+	#else
+	__asm__(
+		"popal\n\t"
+		"add $0xc, %esp\n\t"
+		"pop %ebx\n\t"
+		"pop %ebp\n\t"
+		"iret\n\t"
+	);
+	#endif
 }
+#if defined _MSC_VER
 #ifdef _DEBUG
 #pragma optimize("", off)
 #else
 #pragma optimize("", on)
+#endif
+#else
+#pragma GCC pop_options
 #endif
 
 class GetWindowsFchmodFuncs
@@ -2176,25 +2544,43 @@ class GetWindowsFchmodFuncs
 			sizeofGetPathAscii = (size_t)getPathAsciiEnd - (size_t)getPathAscii;
 
 			EnterCriticalSection(&csring0ExtendedHandleToPath);
+			#if _MSC_VER
 			_asm push edx
 			_asm sidt [esp-2] ;reads IDT into the stack
 			_asm pop edx
 			_asm mov idt, edx
+			#else
+			__asm__ volatile(
+				"pushl %%edx\n\t"
+				"sidt -2(%%esp) #reads IDT into the stack\n\t"
+				"popl %%edx\n\t"
+				"mov %%edx, %0\n\t"
+				: "=m" (idt)
+			);
+			#endif
 
 			idt += (Interrupt*8)+4; /* reads a vector of the required interrupt (INT 5h) */
 
 			oldInt5 = MAKEDWORD(*(WORD *)(idt - 4), *(WORD *)(idt + 2));/* reads an address of the old service of the required interrupt (INT 5h) */
 
-			newInt5 = ring0InstallIFSHookAscii;
+			newInt5 = (void *)ring0InstallIFSHookAscii;
 			*(WORD *)(idt - 4) = LOWORD((DWORD)newInt5);
 			*(WORD *)(idt + 2) = HIWORD((DWORD)newInt5);
 
 			fileSystemApiHandle = handleBuf;
 
 			/* jump into Ring0 (the newly defined service INT 5h) */
+			#if _MSC_VER
 			_asm int Interrupt
 
 			_asm nop
+			#else
+			__asm__ volatile(
+				"int $" VxDStringify(Interrupt) "\n\t"
+
+				"nop\n\t"
+			);
+			#endif
 
 			if(!pData->oldFunc)
 			{
@@ -2222,14 +2608,22 @@ class GetWindowsFchmodFuncs
 				}
 			}
 
-			newInt5 = ring0UninstallIFSFileHookAscii;
+			newInt5 = (void *)ring0UninstallIFSFileHookAscii;
 			*(WORD *)(idt - 4) = LOWORD((DWORD)newInt5);
 			*(WORD *)(idt + 2) = HIWORD((DWORD)newInt5);
 
 			/* jump into Ring0 (the newly defined service INT 5h) */
+			#if _MSC_VER
 			_asm int Interrupt
 
 			_asm nop
+			#else
+			__asm__ volatile(
+				"int $" VxDStringify(Interrupt) "\n\t"
+
+				"nop\n\t"
+			);
+			#endif
 
 			/* restores int 5h */
 			*(WORD *)(idt - 4) = LOWORD((DWORD)oldInt5);
@@ -2255,25 +2649,43 @@ class GetWindowsFchmodFuncs
 			sizeofGetPathUnicode = (size_t)getPathUnicodeEnd - (size_t)getPathUnicode;
 
 			EnterCriticalSection(&csring0ExtendedHandleToPath);
+			#if _MSC_VER
 			_asm push edx
 			_asm sidt [esp-2] ;reads IDT into the stack
 			_asm pop edx
 			_asm mov idt, edx
+			#else
+			__asm__ volatile(
+				"pushl %%edx\n\t"
+				"sidt -2(%%esp) #reads IDT into the stack\n\t"
+				"popl %%edx\n\t"
+				"movl %%edx, %0\n\t"
+				: "=m"(idt)
+			);
+			#endif
 
 			idt += (Interrupt*8)+4; /* reads a vector of the required interrupt (INT 5h) */
 
 			oldInt5 = MAKEDWORD(*(WORD *)(idt - 4), *(WORD *)(idt + 2));/* reads an address of the old service of the required interrupt (INT 5h) */
 
-			newInt5 = ring0InstallIFSHookUnicode;
+			newInt5 = (void *)ring0InstallIFSHookUnicode;
 			*(WORD *)(idt - 4) = LOWORD((DWORD)newInt5);
 			*(WORD *)(idt + 2) = HIWORD((DWORD)newInt5);
 
 			fileSystemApiHandle = handleBuf;
 
 			/* jump into Ring0 (the newly defined service INT 5h) */
+			#if _MSC_VER
 			_asm int Interrupt
 
 			_asm nop
+			#else
+			__asm__ volatile(
+				"int $" VxDStringify(Interrupt) "\n\t"
+
+				"nop\n\t"
+			);
+			#endif
 
 			if(!pUnicodeData->oldFunc)
 			{
@@ -2301,14 +2713,22 @@ class GetWindowsFchmodFuncs
 				}
 			}
 
-			newInt5 = ring0UninstallIFSFileHookUnicode;
+			newInt5 = (void *)ring0UninstallIFSFileHookUnicode;
 			*(WORD *)(idt - 4) = LOWORD((DWORD)newInt5);
 			*(WORD *)(idt + 2) = HIWORD((DWORD)newInt5);
 
 			/* jump into Ring0 (the newly defined service INT 5h) */
+			#if _MSC_VER
 			_asm int Interrupt
 
 			_asm nop
+			#else
+			__asm__ volatile(
+				"int $" VxDStringify(Interrupt) "\n\t"
+
+				"nop\n\t"
+			);
+			#endif
 
 			/* restores int 5h */
 			*(WORD *)(idt - 4) = LOWORD((DWORD)oldInt5);
@@ -2338,23 +2758,41 @@ class GetWindowsFchmodFuncs
 			getRing0HandleHookpHandleBuf = pHandleBuf;
 			getRing0HandleHookpFilePos = pFilePos;
 
+			#if _MSC_VER
 			_asm push edx
 			_asm sidt [esp-2] ;reads IDT into the stack
 			_asm pop edx
 			_asm mov idt, edx
+			#else
+			__asm__ volatile(
+				"pushl %%edx\n\t"
+				"sidt -2(%%esp) #reads IDT into the stack\n\t"
+				"popl %%edx\n\t"
+				"movl %%edx, %0\n\t"
+				: "=m" (idt)
+			);
+			#endif
 
 			idt += (Interrupt*8)+4; // reads a vector of the required interrupt (INT 5h)
 
 			oldInt5 = MAKEDWORD(*(WORD *)(idt - 4), *(WORD *)(idt + 2)); // reads an address of the old service of the required interrupt (INT 5h)
 
-			newInt5 = getRing0HandleHook;
+			newInt5 = (void *)getRing0HandleHook;
 			*(WORD *)(idt - 4) = LOWORD((DWORD)newInt5);
 			*(WORD *)(idt + 2) = HIWORD((DWORD)newInt5);
 
 			// jump into Ring0 (the newly defined service INT 5h)
+			#if _MSC_VER
 			_asm int Interrupt
 
 			_asm nop
+			#else
+			__asm__ volatile(
+				"int $" VxDStringify(Interrupt) "\n\t"
+
+				"nop\n\t"
+			);
+			#endif
 
 			// restores int 5h
 			*(WORD *)(idt - 4) = LOWORD((DWORD)oldInt5);
@@ -3183,7 +3621,7 @@ class GetWindowsFchmodFuncs
 			}
 			else if(fpNtQueryObject)
 			{
-				BYTE buf[sizeof (OBJECT_NAME_INFORMATION) / sizeof (BYTE) + MAX_PATH * sizeof (WCHAR) / sizeof (BYTE) + sizeof (WCHAR) / sizeof (BYTE)];
+				BYTE buf[sizeof (OBJECT_NAME_INFORMATION) / sizeof (BYTE) + MAX_PATH * sizeof (WCHAR) / sizeof (BYTE) + 2 * sizeof (WCHAR) / sizeof (BYTE)];
 				size_t bufSize = sizeof buf / sizeof buf[0];
 
 				ULONG returnLength;
@@ -3336,7 +3774,7 @@ class GetWindowsFchmodFuncs
 			}
 			else if(fpNtQueryObject)
 			{
-				BYTE buf[sizeof (OBJECT_NAME_INFORMATION) / sizeof (BYTE) + MAX_PATH * sizeof (WCHAR) / sizeof (BYTE) + sizeof (WCHAR) / sizeof (BYTE)];
+				BYTE buf[sizeof (OBJECT_NAME_INFORMATION) / sizeof (BYTE) + MAX_PATH * sizeof (WCHAR) / sizeof (BYTE) + 2 * sizeof (WCHAR) / sizeof (BYTE)];
 				size_t bufSize = sizeof buf / sizeof buf[0];
 
 				ULONG returnLength;
@@ -3485,7 +3923,7 @@ class GetWindowsFchmodFuncs
 			}
 			else if(fpNtQueryObject)
 			{
-				BYTE buf[sizeof (OBJECT_NAME_INFORMATION) / sizeof (BYTE) + MAX_PATH * sizeof (WCHAR) / sizeof (BYTE) + sizeof (WCHAR) / sizeof (BYTE)];
+				BYTE buf[sizeof (OBJECT_NAME_INFORMATION) / sizeof (BYTE) + MAX_PATH * sizeof (WCHAR) / sizeof (BYTE) + 2 * sizeof (WCHAR) / sizeof (BYTE)];
 				size_t bufSize = sizeof buf / sizeof buf[0];
 
 				ULONG returnLength;
