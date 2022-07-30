@@ -1,5 +1,6 @@
 #include "fchmod.h"
 
+#define __builtin_ia32_sfence()
 #include <windows.h>
 #include <tchar.h>
 #include <stdio.h>
@@ -130,6 +131,18 @@ struct interrupt_frame;
 
 #ifndef MAKEDWORD
 #define MAKEDWORD(a, b)      ((DWORD)(((WORD)(a)) | ((DWORD)((WORD)(b))) << 16))
+#endif
+
+#ifndef HIDWORD
+#define HIDWORD(l)          ((DWORD)((((ULONGLONG)(l)) >> 32) & 0xffffffff))
+#endif
+
+#ifndef LODWORD
+#define LODWORD(l)          ((DWORD)(((ULONGLONG)(l)) & 0xffffffff))
+#endif
+
+#ifndef MAKEDWORD64
+#define MAKEDWORD64(a, b, c) ((ULONGLONG)(((WORD)(a)) | ((DWORD)((WORD)(b))) << 16 | ((ULONGLONG)((DWORD)(c))) << 32))
 #endif
 
 #ifndef VOLUME_NAME_DOS
@@ -1078,6 +1091,32 @@ struct _QWORD {
 	unsigned long	ddUpper;
 }; /* _QWORD */
 
+#ifndef _ULONGLONG_
+#define _ULONGLONG_
+#if (!defined (_MAC) && (!defined(MIDL_PASS) || defined(__midl)) && (!defined(_M_IX86) || (defined(_INTEGRAL_MAX_BITS) && _INTEGRAL_MAX_BITS >= 64)))
+typedef __int64 LONGLONG;
+typedef unsigned __int64 ULONGLONG;
+
+#define MAXLONGLONG                      (0x7fffffffffffffff)
+#else
+
+#if defined(_MAC) && defined(_MAC_INT_64)
+typedef __int64 LONGLONG;
+typedef unsigned __int64 ULONGLONG;
+
+#define MAXLONGLONG                      (0x7fffffffffffffff)
+#else
+typedef double LONGLONG;
+typedef double ULONGLONG;
+#endif //_MAC and int64
+
+#endif
+
+typedef LONGLONG *PLONGLONG;
+typedef ULONGLONG *PULONGLONG;
+
+#endif
+
 typedef struct event event, *pevent;
 
 typedef union {
@@ -1382,14 +1421,116 @@ PTIB getTIB(VOID)
 {
 	register PTIB pTIB;
 
-#if defined(__X86_64__) || defined(__amd64__)
+#if defined(_M_AMD64)
 	__asm__ volatile ("movq %%gs:0x30, %0" : "=r" (pTIB));
-#elif defined(__i386__)
+#elif defined(_M_IX86)
 	__asm__ volatile ("movl %%fs:0x18, %0" : "=r" (pTIB));
 #else
 #error unsupported architecture
 #endif
 	return pTIB;
+}
+#endif
+
+#if defined _MSC_VER && _MSC_VER >= 1300
+	#ifdef _M_IX86
+		typedef struct KDESCRIPTOR
+		{
+			USHORT Pad[1];
+			USHORT Limit;
+			PVOID Base;
+		} KDESCRIPTOR;
+	#elif _M_AMD64
+		typedef struct KDESCRIPTOR
+		{
+			USHORT Pad[3];
+			USHORT Limit;
+			PVOID Base;
+		} KDESCRIPTOR;
+	#else
+		#error unsupported architecture
+	#endif
+#endif
+
+#if defined _MSC_VER
+	#if _MSC_VER >= 1400
+		#include <intrin.h>
+	#elif _MSC_VER >= 1300
+		#include <WinNT.h>
+	#endif
+	#if _MSC_VER >= 1300
+		_inline PVOID getIDT(void)
+		{
+			KDESCRIPTOR descr;
+			__sidt(&descr.Limit);
+			return (PVOID)descr.Base;
+		}
+	#else
+		_inline PVOID getIDT(void)
+		{
+			#ifdef _M_IX86
+				DWORD idt;
+				WORD limit;
+
+				_asm push edx
+				_asm push dx
+				_asm sidt [esp] ;reads IDT into the stack
+				_asm pop dx
+				_asm mov limit, dx
+				_asm pop edx
+				_asm mov idt, edx
+			#elif _M_AMD64
+				ULONGLONG idt;
+				WORD limit;
+
+				_asm push rdx
+				_asm push dx
+				_asm sidt [rsp]
+				_asm pop dx
+				_asm mov limit, dx
+				_asm pop rdx
+				_asm mov idt, rdx
+			#else
+				#error unsupported architecture
+			#endif
+			return (PVOID)idt;
+		}
+	#endif
+#else
+PVOID getIDT(void)
+{
+#if defined(_M_AMD64)
+	ULONGLONG idt;
+	WORD limit;
+
+    __asm__ volatile(
+                    "pushq %%rdx\n\t"
+                    "pushw %%dx\n\t"
+                    "sidt (%%rsp) #reads IDT into the stack\n\t"
+                    "popw %%dx\n\t"
+                    "movw %%dx,%1\n\t"
+                    "popq %%rdx\n\t"
+                    "movq %%rdx,%0\n\t"
+                    : "=m"(idt), "=m"(limit)
+    );
+#elif defined(_M_IX86)
+	DWORD idt;
+	WORD limit;
+
+    __asm__ volatile(
+				"pushl %%edx\n\t"
+				"pushw %%dx\n\t"
+				"sidt (%%esp) #reads IDT into the stack\n\t"
+				"popw %%dx\n\t"
+				"movw %%dx, %1\n\t"
+				"popl %%edx\n\t"
+				"movl %%edx, %0\n\t"
+                    : "=m"(idt), "=m"(limit)
+    );
+#else
+#error unsupported architecture
+#endif
+	return (PVOID)idt;
 }
 #endif
 
@@ -1405,6 +1546,20 @@ typedef	pIFSFileHookFunc	*ppIFSFileHookFunc;
 static ppIFSFileHookFunc IFSMgr_InstallFileSystemApiHook(pIFSFileHookFunc func)
 {
 	ppIFSFileHookFunc r = NULL;
+#if defined(_M_AMD64)
+	#ifdef _MSC_VER
+	_asm {
+		mov rax, func
+		push rax
+	};
+	#else
+	__asm__ volatile (
+		"movq %0, %%rax\n\t"
+		"pushq %%rax\n\t"
+		: : "m" (func)
+	);
+	#endif
+#elif defined(_M_IX86)
 	#ifdef _MSC_VER
 	_asm {
 		mov eax, func
@@ -1417,7 +1572,24 @@ static ppIFSFileHookFunc IFSMgr_InstallFileSystemApiHook(pIFSFileHookFunc func)
 		: : "m" (func)
 	);
 	#endif
+#else
+#error unsupported architecture
+#endif
 	VxDCall(0x00400067);
+#if defined(_M_AMD64)
+	#ifdef _MSC_VER
+	_asm {
+		pop rcx
+		mov r, rax
+	};
+	#else
+	__asm__ volatile (
+		"popq %%rcx\n\t"
+		"movq %%rax, %0\n\t"
+		: "=m" (r)
+	);
+	#endif
+#elif defined(_M_IX86)
 	#ifdef _MSC_VER
 	_asm {
 		pop ecx
@@ -1430,12 +1602,29 @@ static ppIFSFileHookFunc IFSMgr_InstallFileSystemApiHook(pIFSFileHookFunc func)
 		: "=m" (r)
 	);
 	#endif
+#else
+#error unsupported architecture
+#endif
 	return r;
 }
 
 static ppIFSFileHookFunc IFSMgr_RemoveFileSystemApiHook(pIFSFileHookFunc func)
 {
 	ppIFSFileHookFunc r = NULL;
+#if defined(_M_AMD64)
+	#ifdef _MSC_VER
+	_asm {
+		mov rax, func
+		push rax
+	};
+	#else
+	__asm__ volatile (
+		"movq %0, %%rax\n\t"
+		"pushq %%rax\n\t"
+		: : "m" (func)
+	);
+	#endif
+#elif defined(_M_IX86)
 	#ifdef _MSC_VER
 	_asm {
 		mov eax, func
@@ -1448,7 +1637,24 @@ static ppIFSFileHookFunc IFSMgr_RemoveFileSystemApiHook(pIFSFileHookFunc func)
 		: : "m" (func)
 	);
 	#endif
+#else
+#error unsupported architecture
+#endif
 	VxDCall(0x00400068);
+#if defined(_M_AMD64)
+	#ifdef _MSC_VER
+	_asm {
+		pop rcx
+		mov r, rax
+	};
+	#else
+	__asm__ volatile (
+		"popq %%rcx\n\t"
+		"movq %%rax, %0\n\t"
+		: "=m" (r)
+	);
+	#endif
+#elif defined(_M_IX86)
 	#ifdef _MSC_VER
 	_asm {
 		pop ecx
@@ -1461,6 +1667,9 @@ static ppIFSFileHookFunc IFSMgr_RemoveFileSystemApiHook(pIFSFileHookFunc func)
 		: "=m" (r)
 	);
 	#endif
+#else
+#error unsupported architecture
+#endif
 	return r;
 }
 
@@ -1468,6 +1677,20 @@ static ppIFSFileHookFunc IFSMgr_RemoveFileSystemApiHook(pIFSFileHookFunc func)
 static LPVOID IFSMgr_GetHeap(DWORD allocSize)
 {
 	LPVOID r = NULL;
+#if defined(_M_AMD64)
+	#ifdef _MSC_VER
+	_asm {
+		mov rax, allocSize
+		push rax
+	};
+	#else
+	__asm__ volatile (
+		"movq %0, %%rax\n\t"
+		"pushq %%rax\n\t"
+		: : "m" (allocSize)
+	);
+	#endif
+#elif defined(_M_IX86)
 	#ifdef _MSC_VER
 	_asm {
 		mov eax, allocSize
@@ -1480,7 +1703,24 @@ static LPVOID IFSMgr_GetHeap(DWORD allocSize)
 		: : "m" (allocSize)
 	);
 	#endif
+#else
+#error unsupported architecture
+#endif
 	VxDCall(0x0040000D);
+#if defined(_M_AMD64)
+	#ifdef _MSC_VER
+	_asm {
+		pop rcx
+		mov r, rax
+	};
+	#else
+	__asm__ volatile (
+		"popq %%rcx\n\t"
+		"movq %%rax, %0\n\t"
+		: "=m" (r)
+	);
+	#endif
+#elif defined(_M_IX86)
 	#ifdef _MSC_VER
 	_asm {
 		pop ecx
@@ -1493,11 +1733,28 @@ static LPVOID IFSMgr_GetHeap(DWORD allocSize)
 		: "=m" (r)
 	);
 	#endif
+#else
+#error unsupported architecture
+#endif
 	return r;
 }
 
 static void IFSMgr_RetHeap(LPVOID pMemPtr)
 {
+#if defined(_M_AMD64)
+	#ifdef _MSC_VER
+	_asm {
+		mov rax, pMemPtr
+		push rax
+	};
+	#else
+	__asm__ volatile (
+		"movq %0, %%rax\n\t"
+		"pushq %%rax\n\t"
+		: : "m" (pMemPtr)
+	);
+	#endif
+#elif defined(_M_IX86)
 	#ifdef _MSC_VER
 	_asm {
 		mov eax, pMemPtr
@@ -1510,7 +1767,21 @@ static void IFSMgr_RetHeap(LPVOID pMemPtr)
 		: : "m" (pMemPtr)
 	);
 	#endif
+#else
+#error unsupported architecture
+#endif
 	VxDCall(0x0040000E);
+#if defined(_M_AMD64)
+	#ifdef _MSC_VER
+	_asm {
+		pop rcx
+	}
+	#else
+	__asm__ volatile (
+		"popq %rcx\n\t"
+	);
+	#endif
+#elif defined(_M_IX86)
 	#ifdef _MSC_VER
 	_asm {
 		pop ecx
@@ -1520,6 +1791,9 @@ static void IFSMgr_RetHeap(LPVOID pMemPtr)
 		"popl %ecx\n\t"
 	);
 	#endif
+#else
+#error unsupported architecture
+#endif
 	return;
 }
 
@@ -1527,6 +1801,22 @@ static BOOL IFSMgr_Win32_Get_Ring0_Handle(DWORD handle, PVOID *pHandleBuf, PDWOR
 {
 	BOOL r = FALSE;
 
+#if defined(_M_AMD64)
+	#ifdef _MSC_VER
+	_asm {
+		mov rax, handle
+		mov rbx, rax
+	}
+	#else
+	__asm__ volatile (
+		"movq %0, %%rax\n\t"
+		"movq %%rax, %%rbx\n\t"
+		: 
+		: "m" (handle)
+		: "eax", "ebx"
+	);
+	#endif
+#elif defined(_M_IX86)
 	#ifdef _MSC_VER
 	_asm {
 		mov eax, handle
@@ -1541,7 +1831,34 @@ static BOOL IFSMgr_Win32_Get_Ring0_Handle(DWORD handle, PVOID *pHandleBuf, PDWOR
 		: "eax", "ebx"
 	);
 	#endif
+#else
+#error unsupported architecture
+#endif
 	VxDCall(0x00400033);
+#if defined(_M_AMD64)
+	#ifdef _MSC_VER
+	_asm {
+		mov rax, pHandleBuf
+		mov [rax], rbx
+		mov rax, pFilePos
+		mov [rax], rdx
+		setnb al
+		and rax, 1
+		mov r, rax
+	}
+	#else
+	__asm__ volatile (
+		"movq %0, %%rax\n\t"
+		"movq %%rbx, (%%rax)\n\t"
+		"movq %1, %%rax\n\t"
+		"movq %%rdx, (%%rax)\n\t"
+		"setnbb %%al\n\t"
+		"andq $1, %%rax\n\t" 
+		"movq %%rax, %2\n\t" 
+		: "+m" (pHandleBuf), "+m" (pFilePos), "=m" (r) : : "eax"
+	);
+	#endif
+#elif defined(_M_IX86)
 	#ifdef _MSC_VER
 	_asm {
 		mov eax, pHandleBuf
@@ -1564,6 +1881,9 @@ static BOOL IFSMgr_Win32_Get_Ring0_Handle(DWORD handle, PVOID *pHandleBuf, PDWOR
 		: "+m" (pHandleBuf), "+m" (pFilePos), "=m" (r) : : "eax"
 	);
 	#endif
+#else
+#error unsupported architecture
+#endif
 
 	return r;
 }
@@ -1601,7 +1921,13 @@ typedef struct GetPathUnicodeData {
 size_t sizeofGetPathAscii = 0;
 size_t sizeofGetPathUnicode = 0;
 
-DWORD offLdPData;
+#ifdef _M_IX86
+	DWORD offLdPData;
+#elif _M_AMD64
+	ULONGLONG offLdPData;
+#else
+	#error unsupported architecture
+#endif
 
 DWORD page;
 DWORD func1;
@@ -1640,6 +1966,18 @@ static int	_cdecl getPathAscii( pIFSFunc pfn, int fn, int Drive, int ResType, in
 	DWORD outBufSize;
 	DWORD outBufStart;
 
+#if defined(_M_AMD64)
+	#ifdef _MSC_VER
+	_asm mov rax, 0x00000000
+	_asm mov pData, rax
+	#else
+	__asm__ volatile (
+		"movq $0, %%rax\n\t"
+		"movq %%rax, %0\n\t"
+		: "=m" (pData)
+	);
+	#endif
+#elif defined(_M_IX86)
 	#ifdef _MSC_VER
 	_asm mov eax, 0x00000000
 	_asm mov pData, eax
@@ -1650,6 +1988,9 @@ static int	_cdecl getPathAscii( pIFSFunc pfn, int fn, int Drive, int ResType, in
 		: "=m" (pData)
 	);
 	#endif
+#else
+#error unsupported architecture
+#endif
 
 	pOldFunc = &pData->oldFunc;
 	pCalled = &pData->called;
@@ -1714,6 +2055,22 @@ static int	_cdecl getPathAscii( pIFSFunc pfn, int fn, int Drive, int ResType, in
 				}
 				pOutBuf = &pData->out[outBufStart];
 
+#if defined(_M_AMD64)
+				#ifdef _MSC_VER
+				_asm push CodePage
+				_asm push outBufSize
+				_asm push pp_elements
+				_asm push pOutBuf
+				#else
+				__asm__ volatile( 
+					"pushq %0\n\t"
+					"pushq %1\n\t"
+					"pushq %2\n\t"
+					"pushq %3\n\t"
+					: : "m" (CodePage), "m" (outBufSize), "m" (pp_elements), "m" (pOutBuf)
+				);
+				#endif
+#elif defined(_M_IX86)
 				#ifdef _MSC_VER
 				_asm push CodePage
 				_asm push outBufSize
@@ -1728,8 +2085,35 @@ static int	_cdecl getPathAscii( pIFSFunc pfn, int fn, int Drive, int ResType, in
 					: : "m" (CodePage), "m" (outBufSize), "m" (pp_elements), "m" (pOutBuf)
 				);
 				#endif
+#else
+#error unsupported architecture
+#endif
 				
 				VxDCall(0x00400041);
+#if defined(_M_AMD64)
+				#ifdef _MSC_VER
+				_asm mov rcx, pUnitobcsResult
+				_asm mov [rcx], rax
+				_asm mov [rcx + 4], rdx
+
+				_asm pop rax
+				_asm pop rax
+				_asm pop rax
+				_asm pop rax
+				#else
+				__asm__ volatile( 
+					"movq %0, %%rcx\n\t"
+					"movq %%rax, (%%rcx)\n\t"
+					"movq %%rdx, 4(%%rcx)\n\t"
+
+					"popq %%rax\n\t"
+					"popq %%rax\n\t"
+					"popq %%rax\n\t"
+					"popq %%rax\n\t"
+					: "+m" (pUnitobcsResult)
+				);
+				#endif
+#elif defined(_M_IX86)
 				#ifdef _MSC_VER
 				_asm mov ecx, pUnitobcsResult
 				_asm mov [ecx], eax
@@ -1752,6 +2136,9 @@ static int	_cdecl getPathAscii( pIFSFunc pfn, int fn, int Drive, int ResType, in
 					: "+m" (pUnitobcsResult)
 				);
 				#endif
+#else
+#error unsupported architecture
+#endif
 
 				pData->out[outBufStart + unitobcsResult.ddLower] = 0;
 				outBufStart = outBufStart + unitobcsResult.ddLower;
@@ -1803,6 +2190,22 @@ static int	_cdecl getPathAscii( pIFSFunc pfn, int fn, int Drive, int ResType, in
 				pOutBuf = &pData->out[outBufStart];
 			}
 
+#if defined(_M_AMD64)
+			#ifdef _MSC_VER
+			_asm push CodePage
+			_asm push outBufSize
+			_asm push pp_elements
+			_asm push pOutBuf
+			#else
+			__asm__ volatile (
+				"pushq %0\n\t"
+				"pushq %1\n\t"
+				"pushq %2\n\t"
+				"pushq %3\n\t"
+				: : "m" (CodePage), "m" (outBufSize), "m" (pp_elements), "m" (pOutBuf)
+			);
+			#endif
+#elif defined(_M_IX86)
 			#ifdef _MSC_VER
 			_asm push CodePage
 			_asm push outBufSize
@@ -1817,8 +2220,35 @@ static int	_cdecl getPathAscii( pIFSFunc pfn, int fn, int Drive, int ResType, in
 				: : "m" (CodePage), "m" (outBufSize), "m" (pp_elements), "m" (pOutBuf)
 			);
 			#endif
+#else
+#error unsupported architecture
+#endif
 			
 			VxDCall(0x00400041);
+#if defined(_M_AMD64)
+			#ifdef _MSC_VER
+			_asm mov rcx, pUnitobcsResult
+			_asm mov [rcx], rax
+			_asm mov [rcx + 4], rdx
+
+			_asm pop rax
+			_asm pop rax
+			_asm pop rax
+			_asm pop rax
+			#else
+			__asm__ volatile (
+				"movq %0, %%rcx\n\t"
+				"movq %%rax, (%%rcx)\n\t"
+				"movq %%rdx, 4(%%rcx)\n\t"
+
+				"popq %%rax\n\t"
+				"popq %%rax\n\t"
+				"popq %%rax\n\t"
+				"popq %%rax\n\t"
+				: "+m" (pUnitobcsResult)
+			);
+			#endif
+#elif defined(_M_IX86)
 			#ifdef _MSC_VER
 			_asm mov ecx, pUnitobcsResult
 			_asm mov [ecx], eax
@@ -1841,6 +2271,9 @@ static int	_cdecl getPathAscii( pIFSFunc pfn, int fn, int Drive, int ResType, in
 				: "+m" (pUnitobcsResult)
 			);
 			#endif
+#else
+#error unsupported architecture
+#endif
 
 			pData->out[outBufStart + unitobcsResult.ddLower ] = 0;
 
@@ -1855,6 +2288,28 @@ static int	_cdecl getPathAscii( pIFSFunc pfn, int fn, int Drive, int ResType, in
 	{
 		*pCalled = 1;
 
+#if defined(_M_AMD64)
+		#ifdef _MSC_VER
+		_asm mov rax, pDataBuf
+		_asm mov rsi, [rax]
+		_asm mov rax, pHandleBuf
+		_asm mov rbx, [rax]
+		_asm mov rcx, 4
+		_asm mov rdx, 0
+		_asm mov rax, 0x0D602
+		#else
+		__asm__ volatile (
+			"movq %0, %%rax\n\t"
+			"movq (%%rax), %%rsi\n\t"
+			"movq %1, %%rax\n\t"
+			"movq (%%rax), %%rbx\n\t"
+			"movq $4, %%rcx\n\t"
+			"movq $0, %%rdx\n\t"
+			"movq $0x0D602, %%rax\n\t"
+			: : "m" (pDataBuf), "m" (pHandleBuf)
+		);
+		#endif
+#elif defined(_M_IX86)
 		#ifdef _MSC_VER
 		_asm mov eax, pDataBuf
 		_asm mov esi, [eax]
@@ -1875,6 +2330,9 @@ static int	_cdecl getPathAscii( pIFSFunc pfn, int fn, int Drive, int ResType, in
 			: : "m" (pDataBuf), "m" (pHandleBuf)
 		);
 		#endif
+#else
+#error unsupported architecture
+#endif
 		
 		VxDCall(0x00400032);
 	}
@@ -1914,24 +2372,53 @@ static int	_cdecl getPathAsciiOffsets( pIFSFunc pfn, int fn, int Drive, int ResT
 	DWORD outBufSize;
 	DWORD outBufStart;
 
-	#ifdef _MSC_VER
+	#if _MSC_VER
 ldPData:
-	_asm mov eax, 0x00000000
-	_asm mov pData, eax
+		#ifdef _M_IX86
+			_asm mov eax, 0x00000000
+			_asm mov pData, eax
 
-	_asm mov eax, offset ldPData
-	_asm mov offLdPData, eax
+			_asm mov eax, offset ldPData
+			_asm mov offLdPData, eax
+		#elif _M_AMD64
+			_asm mov rax, 0x00000000
+			_asm mov pData, rax
+
+			_asm mov rax, offset ldPData
+			_asm mov offLdPData, rax
+		#else
+			#error unsupported architecture
+		#endif	
 	#else
-	__asm__ volatile (
-		"ldPData:\n\t"
-		"movl $0x00000000, %%eax\n\t"
-		"movl %%eax, %0\n\t"
-		"movl $ldPData, %%eax\n\t"
-		"movl %%eax, %1\n\t"
-		: "=m"(pData), "=m"(offLdPData) );
+		__asm__ volatile (
+			"ldPData:\n\t"
+		#ifdef _M_IX86
+			"movl $0x00000000, %%eax\n\t"
+			"movl %%eax, %0\n\t"
+
+			"movl $ldPData, %%eax\n\t"
+			"movl %%eax, %1\n\t"
+		#elif _M_AMD64
+			"movq $0x00000000, %%rax\n\t"
+			"movq %%rax, %0\n\t"
+
+			"movq $ldPData, %%rax\n\t"
+			"movq %%rax, %1\n\t"
+		#else
+			#error unsupported architecture
+		#endif
+	
+		: "=m"(pData), "=m"(offLdPData)
+	);
 	#endif
 
-	offLdPData -= (DWORD)getPathAsciiOffsets;
+	#ifdef _M_IX86
+		offLdPData -= (DWORD)getPathAsciiOffsets;
+	#elif _M_AMD64
+		offLdPData -= (ULONGLONG)getPathAsciiOffsets;
+	#else
+		#error unsupported architecture
+	#endif
 
 	return 0;
 }
@@ -1971,6 +2458,18 @@ struct ParsedPath {
 	struct PathElement pp_elements[1];
 };*/
 
+#if defined(_M_AMD64)
+	#ifdef _MSC_VER
+	_asm mov rax, 0x00000000
+	_asm mov pUnicodeData, rax
+	#else
+	__asm__ volatile (
+		"movq $0x00000000, %%rax\n\t"
+		"movq %%rax, %0\n\t"
+		: "=m" (pUnicodeData)
+	);
+	#endif
+#elif defined(_M_IX86)
 	#ifdef _MSC_VER
 	_asm mov eax, 0x00000000
 	_asm mov pUnicodeData, eax
@@ -1981,6 +2480,9 @@ struct ParsedPath {
 		: "=m" (pUnicodeData)
 	);
 	#endif
+#else
+#error unsupported architecture
+#endif
 
 	pOldFunc = &pUnicodeData->oldFunc;
 	pCalled = &pUnicodeData->called;
@@ -2055,10 +2557,22 @@ struct ParsedPath {
 						outBufStart++;
 					}*/
 					pp_element = &pOutPath->pp_elements[0];
-					parsedPathEnd = (LPVOID)((DWORD)pOutPath + pOutPath->pp_totalLength);
+					#ifdef _M_IX86
+						parsedPathEnd = (LPVOID)((DWORD)pOutPath + pOutPath->pp_totalLength);
+					#elif _M_AMD64
+						parsedPathEnd = (LPVOID)((ULONGLONG)pOutPath + pOutPath->pp_totalLength);
+					#else
+						#error unsupported architecture
+					#endif
 					while((LPVOID)pp_element < parsedPathEnd && outBufStart < sizeof pUnicodeData->out / sizeof pUnicodeData->out[0] - 1)
 					{
-						pathElementEnd = (LPVOID)((DWORD)pp_element + pp_element->pe_length);
+						#ifdef _M_IX86
+							pathElementEnd = (LPVOID)((DWORD)pp_element + pp_element->pe_length);
+						#elif _M_AMD64
+							pathElementEnd = (LPVOID)((ULONGLONG)pp_element + pp_element->pe_length);
+						#else
+							#error unsupported architecture
+						#endif
 
 						pUnicodeData->out[outBufStart] = (WCHAR)'\\';
 						outBufStart++;
@@ -2135,10 +2649,22 @@ struct ParsedPath {
 					outBufStart++;
 				}*/
 				pp_element = &pOutPath->pp_elements[0];
-				parsedPathEnd = (LPVOID)((DWORD)pOutPath + pOutPath->pp_totalLength);
+				#ifdef _M_IX86
+					parsedPathEnd = (LPVOID)((DWORD)pOutPath + pOutPath->pp_totalLength);
+				#elif _M_AMD64
+					parsedPathEnd = (LPVOID)((ULONGLONG)pOutPath + pOutPath->pp_totalLength);
+				#else
+					#error unsupported architecture
+				#endif
 				while((LPVOID)pp_element < parsedPathEnd && outBufStart < sizeof pUnicodeData->out / sizeof pUnicodeData->out[0] - 1)
 				{
-					pathElementEnd = (LPVOID)((DWORD)pp_element + pp_element->pe_length);
+					#ifdef _M_IX86
+						pathElementEnd = (LPVOID)((DWORD)pp_element + pp_element->pe_length);
+					#elif _M_AMD64
+						pathElementEnd = (LPVOID)((ULONGLONG)pp_element + pp_element->pe_length);
+					#else
+						#error unsupported architecture
+					#endif
 
 					pUnicodeData->out[outBufStart] = (WCHAR)'\\';
 					outBufStart++;
@@ -2163,6 +2689,28 @@ struct ParsedPath {
 	{
 		*pCalled = 1;
 
+#if defined(_M_AMD64)
+		#ifdef _MSC_VER
+		_asm mov rax, pDataBuf
+		_asm mov rsi, [rax]
+		_asm mov rax, pHandleBuf
+		_asm mov rbx, [rax]
+		_asm mov rcx, 4
+		_asm mov rdx, 0
+		_asm mov rax, 0x0D602
+		#else
+		__asm__ volatile (
+			"movq %0, %%rax\n\t"
+			"movq (%%rax), %%rsi\n\t"
+			"movq %1, %%rax\n\t"
+			"movq (%%rax), %%rbx\n\t"
+			"movq $4, %%rcx\n\t"
+			"movq $0, %%rdx\n\t"
+			"movq $0x0D602, %%rax\n\t"
+			: : "m"(pDataBuf), "m"(pHandleBuf)
+		);
+		#endif
+#elif defined(_M_IX86)
 		#ifdef _MSC_VER
 		_asm mov eax, pDataBuf
 		_asm mov esi, [eax]
@@ -2183,6 +2731,9 @@ struct ParsedPath {
 			: : "m"(pDataBuf), "m"(pHandleBuf)
 		);
 		#endif
+#else
+#error unsupported architecture
+#endif
 		
 		VxDCall(0x00400032);
 	}
@@ -2220,6 +2771,26 @@ static int	_cdecl getPathUnicodeOffsets( pIFSFunc pfn, int fn, int Drive, int Re
 	struct PathElement *pp_element;
 	LPVOID parsedPathEnd;
 
+#if defined(_M_AMD64)
+	#if _MSC_VER
+ldPData:
+	_asm mov rax, 0x00000000
+	_asm mov pUnicodeData, rax
+
+	_asm mov rax, offset ldPData
+	_asm mov offLdPData, rax
+	#else
+	__asm__ volatile (
+		"lpPData:\n\t"
+		"movq $0x00000000, %%rax\n\t"
+		"movq %%rax, %0\n\t"
+
+		"movq $lpPData, %%rax\n\t"
+		"movq %%rax, %1\n\t"
+		: "=m"(pUnicodeData), "=m"(offLdPData)
+	);
+	#endif
+#elif defined(_M_IX86)
 	#if _MSC_VER
 ldPData:
 	_asm mov eax, 0x00000000
@@ -2238,8 +2809,17 @@ ldPData:
 		: "=m"(pUnicodeData), "=m"(offLdPData)
 	);
 	#endif
+#else
+#error unsupported architecture
+#endif
 
-	offLdPData -= (DWORD)getPathUnicodeOffsets;
+	#ifdef _M_IX86
+		offLdPData -= (DWORD)getPathUnicodeOffsets;
+	#elif _M_AMD64
+		offLdPData -= (ULONGLONG)getPathUnicodeOffsets;
+	#else
+		#error unsupported architecture
+	#endif
 
 	return 0;
 }
@@ -2256,19 +2836,56 @@ INTERRUPT void WINAPI ring0InstallIFSHookAscii(struct interrupt_frame *frame)
 void WINAPI ring0InstallIFSHookAscii(void)
 #endif
 {
+#if defined(_M_AMD64)
+	#ifdef _MSC_VER
+	_asm push rax
+	_asm push rcx
+	_asm push rdx
+	_asm push rbx
+	_asm push rbp
+	_asm push rsi
+	_asm push rdi
+	#elif __GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1)
+	#else
+	__asm__ volatile (
+		"pushq %rax\n\t"
+		"pushq %rcx\n\t"
+		"pushq %rdx\n\t"
+		"pushq %rbx\n\t"
+		"pushq %rbp\n\t"
+		"pushq %rsi\n\t"
+		"pushq %rdi\n\t"
+	);
+	#endif
+#elif defined(_M_IX86)
 	#ifdef _MSC_VER
 	_asm pushad
 	#elif __GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1)
 	#else
 	__asm__("pushal\n\t");
 	#endif
+#else
+#error unsupported architecture
+#endif
 
-	sizeofGetPathAscii = (DWORD)getPathAsciiEnd - (DWORD)getPathAscii;
+	#ifdef _M_IX86
+		sizeofGetPathAscii = (DWORD)getPathAsciiEnd - (DWORD)getPathAscii;
+	#elif _M_AMD64
+		sizeofGetPathAscii = (ULONGLONG)getPathAsciiEnd - (ULONGLONG)getPathAscii;
+	#else
+		#error unsupported architecture
+	#endif
 
 	//fileSystemApiHandle = (LPVOID)GlobalAlloc(GPTR, sizeofGetPathAscii);
 	//page = PageAllocate(22, PG_SYS, 0, 0, 0, 0xFFFFFFFF, &memBlock, PAGEZEROINIT | PAGEUSEALIGN  | PAGECONTIG | PAGEFIXED);
 
-	memBlock = IFSMgr_GetHeap(4 * ((sizeofGetPathAscii + 3) / 4) + sizeof (GetPathAsciiData));
+	#ifdef _M_IX86
+		memBlock = IFSMgr_GetHeap(4 * ((sizeofGetPathAscii + 3) / 4) + sizeof (GetPathAsciiData));
+	#elif _M_AMD64
+		memBlock = IFSMgr_GetHeap(8 * ((sizeofGetPathAscii + 7) / 8) + sizeof (GetPathAsciiData));
+	#else
+		#error unsupported architecture
+	#endif
 
 	if(memBlock == NULL)
 	{
@@ -2279,8 +2896,20 @@ void WINAPI ring0InstallIFSHookAscii(void)
 		memcpy((char *)memBlock, (char *)getPathAscii, sizeofGetPathAscii);
 		getPathAsciiOffsets(NULL, 0, 0, 0, 0, NULL);
 		offLdPData++;
-		*(DWORD *)((DWORD)memBlock + offLdPData) = (DWORD)memBlock + (4 * ((sizeofGetPathAscii + 3) / 4));
-		pData = (PGetPathAsciiData)((DWORD)memBlock + (4 * ((sizeofGetPathAscii + 3) / 4)));
+		#ifdef _M_IX86
+			*(DWORD *)((DWORD)memBlock + offLdPData) = (DWORD)memBlock + (4 * ((sizeofGetPathAscii + 3) / 4));
+		#elif _M_AMD64
+			*(ULONGLONG *)((ULONGLONG)memBlock + offLdPData) = (ULONGLONG)memBlock + (8 * ((sizeofGetPathAscii + 7) / 8));
+		#else
+			#error unsupported architecture
+		#endif
+		#ifdef _M_IX86
+			pData = (PGetPathAsciiData)((DWORD)memBlock + (4 * ((sizeofGetPathAscii + 3) / 4)));
+		#elif _M_AMD64
+			pData = (PGetPathAsciiData)((ULONGLONG)memBlock + (8 * ((sizeofGetPathAscii + 7) / 8)));
+		#else
+			#error unsupported architecture
+		#endif
 		pData->called = FALSE;
 		pData->error = FALSE;
 		pData->handleBuf = fileSystemApiHandle;
@@ -2297,6 +2926,33 @@ void WINAPI ring0InstallIFSHookAscii(void)
 		pData->oldFunc = (ppIFSFileHookFunc)IFSMgr_InstallFileSystemApiHook((pIFSFileHookFunc)memBlock);
 	}
 
+#if defined(_M_AMD64)
+	#if _MSC_VER
+	_asm pop rdi
+	_asm pop rsi
+	_asm pop rbp
+	_asm pop rbx
+	_asm pop rdx
+	_asm pop rcx
+	_asm pop rax
+	_asm iretd
+	#elif __GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1)
+	#else
+	__asm__ volatile(
+		"popq %rdi\n\t"
+		"popq %rsi\n\t"
+		"popq %rbp\n\t"
+		"popq %rbx\n\t"
+		"popq %rdx\n\t"
+		"popq %rcx\n\t"
+		"popq %rax\n\t"
+		"add $0x24, %rsp\n\t"
+		"pop %rbx\n\t"
+		"pop %rbp\n\t"
+		"iret\n\t"
+	);
+	#endif
+#elif defined(_M_IX86)
 	#if _MSC_VER
 	_asm popad
 	_asm iretd
@@ -2310,6 +2966,9 @@ void WINAPI ring0InstallIFSHookAscii(void)
 		"iret\n\t"
 	);
 	#endif
+#else
+#error unsupported architecture
+#endif
 }
 
 #if _MSC_VER
@@ -2320,12 +2979,37 @@ INTERRUPT void WINAPI ring0UninstallIFSFileHookAscii(struct interrupt_frame *fra
 void WINAPI ring0UninstallIFSFileHookAscii(void)
 #endif
 {
-	#if _MSC_VER
+#if defined(_M_AMD64)
+	#ifdef _MSC_VER
+	_asm push rax
+	_asm push rcx
+	_asm push rdx
+	_asm push rbx
+	_asm push rbp
+	_asm push rsi
+	_asm push rdi
+	#elif __GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1)
+	#else
+	__asm__ volatile (
+		"pushq %rax\n\t"
+		"pushq %rcx\n\t"
+		"pushq %rdx\n\t"
+		"pushq %rbx\n\t"
+		"pushq %rbp\n\t"
+		"pushq %rsi\n\t"
+		"pushq %rdi\n\t"
+	);
+	#endif
+#elif defined(_M_IX86)
+	#ifdef _MSC_VER
 	_asm pushad
 	#elif __GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1)
 	#else
-	__asm__ volatile("pushal\n\t");
+	__asm__("pushal\n\t");
 	#endif
+#else
+#error unsupported architecture
+#endif
 
 	if(pData->oldFunc && memBlock)
 	{
@@ -2337,6 +3021,32 @@ void WINAPI ring0UninstallIFSFileHookAscii(void)
 		IFSMgr_RetHeap(memBlock);
 	}
 
+#if defined(_M_AMD64)
+	#if _MSC_VER
+	_asm pop rdi
+	_asm pop rsi
+	_asm pop rbp
+	_asm pop rbx
+	_asm pop rdx
+	_asm pop rcx
+	_asm pop rax
+	_asm iretd
+	#elif __GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1)
+	#else
+	__asm__ volatile(
+		"popq %rdi\n\t"
+		"popq %rsi\n\t"
+		"popq %rbp\n\t"
+		"popq %rbx\n\t"
+		"popq %rdx\n\t"
+		"popq %rcx\n\t"
+		"popq %rax\n\t"
+		"add $0x4, %rsp\n\t"
+		"pop %rbp\n\t"
+		"iret\n\t"
+	);
+	#endif
+#elif defined(_M_IX86)
 	#if _MSC_VER
 	_asm popad
 	_asm iretd
@@ -2349,6 +3059,9 @@ void WINAPI ring0UninstallIFSFileHookAscii(void)
 		"iret\n\t"
 	);
 	#endif
+#else
+#error unsupported architecture
+#endif
 }
 
 #if _MSC_VER
@@ -2359,19 +3072,57 @@ INTERRUPT void WINAPI ring0InstallIFSHookUnicode(struct interrupt_frame *frame)
 void WINAPI ring0InstallIFSHookUnicode(void)
 #endif
 {
-	#if _MSC_VER
+#if defined(_M_AMD64)
+	#ifdef _MSC_VER
+	_asm push rax
+	_asm push rcx
+	_asm push rdx
+	_asm push rbx
+	_asm push rbp
+	_asm push rsi
+	_asm push rdi
+	#elif __GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1)
+	#else
+	__asm__ volatile (
+		"pushq %rax\n\t"
+		"pushq %rcx\n\t"
+		"pushq %rdx\n\t"
+		"pushq %rbx\n\t"
+		"pushq %rbp\n\t"
+		"pushq %rsi\n\t"
+		"pushq %rdi\n\t"
+	);
+	#endif
+#elif defined(_M_IX86)
+	#ifdef _MSC_VER
 	_asm pushad
 	#elif __GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1)
 	#else
-	__asm__ volatile("pushal\n\t");
+	__asm__("pushal\n\t");
 	#endif
+#else
+#error unsupported architecture
+#endif
 
-	sizeofGetPathUnicode = (DWORD)getPathUnicodeEnd - (DWORD)getPathUnicode;
+	#ifdef _M_IX86
+		sizeofGetPathUnicode = (DWORD)getPathUnicodeEnd - (DWORD)getPathUnicode;
+	#elif _M_AMD64
+		sizeofGetPathUnicode = (ULONGLONG)getPathUnicodeEnd - (ULONGLONG)getPathUnicode;
+	#else
+		#error unsupported architecture
+	#endif
 
 	//fileSystemApiHandle = (LPVOID)GlobalAlloc(GPTR, sizeofGetPathAscii);
 	//page = PageAllocate(22, PG_SYS, 0, 0, 0, 0xFFFFFFFF, &memBlock, PAGEZEROINIT | PAGEUSEALIGN  | PAGECONTIG | PAGEFIXED);
 
-	memBlock = IFSMgr_GetHeap(4 * ((sizeofGetPathUnicode + 3) / 4) + sizeof (GetPathUnicodeData));
+	#ifdef _M_IX86
+		memBlock = IFSMgr_GetHeap(4 * ((sizeofGetPathUnicode + 3) / 4) + sizeof (GetPathUnicodeData));
+	#elif _M_AMD64
+		memBlock = IFSMgr_GetHeap(8 * ((sizeofGetPathUnicode + 7) / 8) + sizeof (GetPathUnicodeData));
+	#else
+		#error unsupported architecture
+	#endif
+	
 
 	if(memBlock == NULL)
 	{
@@ -2382,8 +3133,20 @@ void WINAPI ring0InstallIFSHookUnicode(void)
 		memcpy((char *)memBlock, (char *)getPathUnicode, sizeofGetPathUnicode);
 		getPathUnicodeOffsets(NULL, 0, 0, 0, 0, NULL);
 		offLdPData++;
-		*(DWORD *)((DWORD)memBlock + offLdPData) = (DWORD)memBlock + (4 * ((sizeofGetPathUnicode + 3) / 4));
-		pUnicodeData = (PGetPathUnicodeData)((DWORD)memBlock + (4 * ((sizeofGetPathUnicode + 3) / 4)));
+		#ifdef _M_IX86
+			*(DWORD *)((DWORD)memBlock + offLdPData) = (DWORD)memBlock + (4 * ((sizeofGetPathUnicode + 3) / 4));
+		#elif _M_AMD64
+			*(DWORD *)((ULONGLONG)memBlock + offLdPData) = (ULONGLONG)memBlock + (8 * ((sizeofGetPathUnicode + 7) / 8));
+		#else
+			#error unsupported architecture
+		#endif
+		#ifdef _M_IX86
+			pUnicodeData = (PGetPathUnicodeData)((DWORD)memBlock + (4 * ((sizeofGetPathUnicode + 3) / 4)));
+		#elif _M_AMD64
+			pUnicodeData = (PGetPathUnicodeData)((ULONGLONG)memBlock + (8 * ((sizeofGetPathUnicode + 7) / 8)));
+		#else
+			#error unsupported architecture
+		#endif
 		pUnicodeData->called = FALSE;
 		pUnicodeData->error = FALSE;
 		pUnicodeData->handleBuf = fileSystemApiHandle;
@@ -2400,6 +3163,33 @@ void WINAPI ring0InstallIFSHookUnicode(void)
 		pUnicodeData->oldFunc = (ppIFSFileHookFunc)IFSMgr_InstallFileSystemApiHook((pIFSFileHookFunc)memBlock);
 	}
 
+#if defined(_M_AMD64)
+	#if _MSC_VER
+	_asm pop rdi
+	_asm pop rsi
+	_asm pop rbp
+	_asm pop rbx
+	_asm pop rdx
+	_asm pop rcx
+	_asm pop rax
+	_asm iretd
+	#elif __GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1)
+	#else
+	__asm__ volatile (
+		"popq %rdi\n\t"
+		"popq %rsi\n\t"
+		"popq %rbp\n\t"
+		"popq %rbx\n\t"
+		"popq %rdx\n\t"
+		"popq %rcx\n\t"
+		"popq %rax\n\t"
+		"add $0x24, %rsp\n\t"
+		"pop %rbx\n\t"
+		"pop %rbp\n\t"
+		"iret\n\t"
+	);
+	#endif
+#elif defined(_M_IX86)
 	#if _MSC_VER
 	_asm popad
 	_asm iretd
@@ -2413,6 +3203,9 @@ void WINAPI ring0InstallIFSHookUnicode(void)
 		"iret\n\t"
 	);
 	#endif
+#else
+#error unsupported architecture
+#endif
 }
 
 #if _MSC_VER
@@ -2423,12 +3216,37 @@ INTERRUPT void WINAPI ring0UninstallIFSFileHookUnicode(struct interrupt_frame *f
 void WINAPI ring0UninstallIFSFileHookUnicode(void)
 #endif
 {
-	#if _MSC_VER
-	_asm pushad
-	#elif (__GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1))
+#if defined(_M_AMD64)
+	#ifdef _MSC_VER
+	_asm push rax
+	_asm push rcx
+	_asm push rdx
+	_asm push rbx
+	_asm push rbp
+	_asm push rsi
+	_asm push rdi
+	#elif __GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1)
 	#else
-	__asm__ volatile("pushal");
+	__asm__ volatile (
+		"pushq %rax\n\t"
+		"pushq %rcx\n\t"
+		"pushq %rdx\n\t"
+		"pushq %rbx\n\t"
+		"pushq %rbp\n\t"
+		"pushq %rsi\n\t"
+		"pushq %rdi\n\t"
+	);
 	#endif
+#elif defined(_M_IX86)
+	#ifdef _MSC_VER
+	_asm pushad
+	#elif __GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1)
+	#else
+	__asm__("pushal\n\t");
+	#endif
+#else
+#error unsupported architecture
+#endif
 
 	if(pUnicodeData->oldFunc && memBlock)
 	{
@@ -2440,6 +3258,32 @@ void WINAPI ring0UninstallIFSFileHookUnicode(void)
 		IFSMgr_RetHeap(memBlock);
 	}
 
+#if defined(_M_AMD64)
+	#if _MSC_VER
+	_asm pop rdi
+	_asm pop rsi
+	_asm pop rbp
+	_asm pop rbx
+	_asm pop rdx
+	_asm pop rcx
+	_asm pop rax
+	_asm iretd
+	#elif (__GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1))
+	#else
+	__asm__(
+		"popq %rdi\n\t"
+		"popq %rsi\n\t"
+		"popq %rbp\n\t"
+		"popq %rbx\n\t"
+		"popq %rdx\n\t"
+		"popq %rcx\n\t"
+		"popq %rax\n\t"
+		"add $0x4, %rsp\n\t"
+		"pop %rbp\n\t"
+		"iret\n\t"
+	);
+	#endif
+#elif defined(_M_IX86)
 	#if _MSC_VER
 	_asm popad
 	_asm iretd
@@ -2452,6 +3296,9 @@ void WINAPI ring0UninstallIFSFileHookUnicode(void)
 		"iret\n\t"
 	);
 	#endif
+#else
+#error unsupported architecture
+#endif
 }
 
 #if _MSC_VER
@@ -2462,15 +3309,67 @@ static INTERRUPT void WINAPI getRing0HandleHook(struct interrupt_frame *frame)
 static void WINAPI getRing0HandleHook(void)
 #endif
 {
-	#if _MSC_VER
-	_asm pushad
-	#elif (__GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1))
+#if defined(_M_AMD64)
+	#ifdef _MSC_VER
+	_asm push rax
+	_asm push rcx
+	_asm push rdx
+	_asm push rbx
+	_asm push rbp
+	_asm push rsi
+	_asm push rdi
+	#elif __GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1)
 	#else
-	__asm__("pushal");
+	__asm__ volatile (
+		"pushq %rax\n\t"
+		"pushq %rcx\n\t"
+		"pushq %rdx\n\t"
+		"pushq %rbx\n\t"
+		"pushq %rbp\n\t"
+		"pushq %rsi\n\t"
+		"pushq %rdi\n\t"
+	);
 	#endif
+#elif defined(_M_IX86)
+	#ifdef _MSC_VER
+	_asm pushad
+	#elif __GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1)
+	#else
+	__asm__("pushal\n\t");
+	#endif
+#else
+#error unsupported architecture
+#endif
 
 	*getRing0HandleHookRet = IFSMgr_Win32_Get_Ring0_Handle(*getRing0HandleHookExtendedFileHandle, getRing0HandleHookpHandleBuf, getRing0HandleHookpFilePos);
 
+#if defined(_M_AMD64)
+	#if _MSC_VER
+	_asm pop rdi
+	_asm pop rsi
+	_asm pop rbp
+	_asm pop rbx
+	_asm pop rdx
+	_asm pop rcx
+	_asm pop rax
+	_asm iretd
+	#elif (__GNUC__ > 7 || (__GNUC__  == 7 && __GNUC_MINOR__ >= 1))
+	#else
+	__asm__(
+		"popq %rdi\n\t"
+		"popq %rsi\n\t"
+		"popq %rbp\n\t"
+		"popq %rbx\n\t"
+		"popq %rdx\n\t"
+		"popq %rcx\n\t"
+		"popq %rax\n\t"
+		"add $0xc, %rsp\n\t"
+		"pop %rbx\n\t"
+		"pop %rbp\n\t"
+		"iret\n\t"
+	);
+	#endif
+#elif defined(_M_IX86)
 	#if _MSC_VER
 	_asm popad
 	_asm iretd
@@ -2484,6 +3383,9 @@ static void WINAPI getRing0HandleHook(void)
 		"iret\n\t"
 	);
 	#endif
+#else
+#error unsupported architecture
+#endif
 }
 #if defined _MSC_VER
 #ifdef _DEBUG
@@ -2524,14 +3426,26 @@ class GetWindowsFchmodFuncs
 		static BOOL OSWinME;
 		static CRITICAL_SECTION csgetRing0Handle;
 		static CRITICAL_SECTION csring0ExtendedHandleToPath;
+		#ifdef _M_IX86
 		static DWORD obsfucator;
+		#elif _M_AMD64
+		static ULONGLONG obsfucator;
+		#else
+			#error unsupported architecture
+		#endif
 		static PTIB pTib;
 		static PTHREAD_DATABASE pTdb;
 		static PPROCESS_DATABASE pPdb;
 
 		static BOOL ring0ExtendedHandleToPathAscii(LPVOID handleBuf, BYTE *buf, size_t bufSize)
 		{
-			DWORD idt;
+			#ifdef _M_IX86
+				DWORD idt;
+			#elif _M_AMD64
+				ULONGLONG idt;
+			#else
+				#error unsupported architecture
+			#endif
 			DWORD oldInt5;
 			void *newInt5;
 			BOOL success = FALSE;
@@ -2544,28 +3458,41 @@ class GetWindowsFchmodFuncs
 			sizeofGetPathAscii = (size_t)getPathAsciiEnd - (size_t)getPathAscii;
 
 			EnterCriticalSection(&csring0ExtendedHandleToPath);
-			#if _MSC_VER
-			_asm push edx
-			_asm sidt [esp-2] ;reads IDT into the stack
-			_asm pop edx
-			_asm mov idt, edx
+			#ifdef _M_IX86
+				idt = (DWORD)getIDT();
+			#elif _M_AMD64
+				idt = (ULONGLONG)getIDT();
 			#else
-			__asm__ volatile(
-				"pushl %%edx\n\t"
-				"sidt -2(%%esp) #reads IDT into the stack\n\t"
-				"popl %%edx\n\t"
-				"mov %%edx, %0\n\t"
-				: "=m" (idt)
-			);
+				#error unsupported architecture
 			#endif
 
-			idt += (Interrupt*8)+4; /* reads a vector of the required interrupt (INT 5h) */
+			#ifdef _M_IX86
+				idt += (Interrupt*8)+4; /* reads a vector of the required interrupt (INT 5h) */
+			#elif _M_AMD64
+				idt += (Interrupt*16)+4; /* reads a vector of the required interrupt (INT 5h) */
+			#else
+				#error unsupported architecture
+			#endif
 
-			oldInt5 = MAKEDWORD(*(WORD *)(idt - 4), *(WORD *)(idt + 2));/* reads an address of the old service of the required interrupt (INT 5h) */
+			#ifdef _M_IX86
+				oldInt5 = MAKEDWORD(*(WORD *)(idt - 4), *(WORD *)(idt + 2));/* reads an address of the old service of the required interrupt (INT 5h) */
+			#elif _M_AMD64
+				oldInt5 = MAKEDWORD64(*(WORD *)(idt - 4), *(WORD *)(idt + 2), *(DWORD *)(idt + 4));/* reads an address of the old service of the required interrupt (INT 5h) */
+			#else
+				#error unsupported architecture
+			#endif
 
 			newInt5 = (void *)ring0InstallIFSHookAscii;
-			*(WORD *)(idt - 4) = LOWORD((DWORD)newInt5);
-			*(WORD *)(idt + 2) = HIWORD((DWORD)newInt5);
+			#ifdef _M_IX86
+				*(WORD *)(idt - 4) = LOWORD((DWORD)newInt5);
+				*(WORD *)(idt + 2) = HIWORD((DWORD)newInt5);
+			#elif _M_AMD64
+				*(WORD *)(idt - 4) = LOWORD(LODWORD((ULONGLONG)newInt5));
+				*(WORD *)(idt + 2) = HIWORD(LODWORD((ULONGLONG)newInt5));
+				*(DWORD *)(idt + 4) = HIDWORD((ULONGLONG)newInt5);
+			#else
+				#error unsupported architecture
+			#endif
 
 			fileSystemApiHandle = handleBuf;
 
@@ -2609,8 +3536,16 @@ class GetWindowsFchmodFuncs
 			}
 
 			newInt5 = (void *)ring0UninstallIFSFileHookAscii;
-			*(WORD *)(idt - 4) = LOWORD((DWORD)newInt5);
-			*(WORD *)(idt + 2) = HIWORD((DWORD)newInt5);
+			#ifdef _M_IX86
+				*(WORD *)(idt - 4) = LOWORD((DWORD)newInt5);
+				*(WORD *)(idt + 2) = HIWORD((DWORD)newInt5);
+			#elif _M_AMD64
+				*(WORD *)(idt - 4) = LOWORD(LODWORD((ULONGLONG)newInt5));
+				*(WORD *)(idt + 2) = HIWORD(LODWORD((ULONGLONG)newInt5));
+				*(DWORD *)(idt + 4) = HIDWORD((ULONGLONG)newInt5);
+			#else
+				#error unsupported architecture
+			#endif
 
 			/* jump into Ring0 (the newly defined service INT 5h) */
 			#if _MSC_VER
@@ -2626,8 +3561,16 @@ class GetWindowsFchmodFuncs
 			#endif
 
 			/* restores int 5h */
-			*(WORD *)(idt - 4) = LOWORD((DWORD)oldInt5);
-			*(WORD *)(idt + 2) = HIWORD((DWORD)oldInt5);
+			#ifdef _M_IX86
+				*(WORD *)(idt - 4) = LOWORD((DWORD)oldInt5);
+				*(WORD *)(idt + 2) = HIWORD((DWORD)oldInt5);
+			#elif _M_AMD64
+				*(WORD *)(idt - 4) = LOWORD(LODWORD((ULONGLONG)oldInt5));
+				*(WORD *)(idt + 2) = HIWORD(LODWORD((ULONGLONG)oldInt5));
+				*(DWORD *)(idt + 4) = HIDWORD((ULONGLONG)oldInt5);
+			#else
+				#error unsupported architecture
+			#endif
 
 			LeaveCriticalSection(&csring0ExtendedHandleToPath);
 
@@ -2636,7 +3579,13 @@ class GetWindowsFchmodFuncs
 
 		static BOOL ring0ExtendedHandleToPathUnicode(LPVOID handleBuf, WCHAR *buf, size_t bufSize)
 		{
-			DWORD idt;
+			#ifdef _M_IX86
+				DWORD idt;
+			#elif _M_AMD64
+				ULONGLONG idt;
+			#else
+				#error unsupported architecture
+			#endif
 			DWORD oldInt5;
 			void *newInt5;
 			BOOL success = FALSE;
@@ -2649,28 +3598,41 @@ class GetWindowsFchmodFuncs
 			sizeofGetPathUnicode = (size_t)getPathUnicodeEnd - (size_t)getPathUnicode;
 
 			EnterCriticalSection(&csring0ExtendedHandleToPath);
-			#if _MSC_VER
-			_asm push edx
-			_asm sidt [esp-2] ;reads IDT into the stack
-			_asm pop edx
-			_asm mov idt, edx
+			#ifdef _M_IX86
+				idt = (DWORD)getIDT();
+			#elif _M_AMD64
+				idt = (ULONGLONG)getIDT();
 			#else
-			__asm__ volatile(
-				"pushl %%edx\n\t"
-				"sidt -2(%%esp) #reads IDT into the stack\n\t"
-				"popl %%edx\n\t"
-				"movl %%edx, %0\n\t"
-				: "=m"(idt)
-			);
+				#error unsupported architecture
 			#endif
 
-			idt += (Interrupt*8)+4; /* reads a vector of the required interrupt (INT 5h) */
+			#ifdef _M_IX86
+				idt += (Interrupt*8)+4; /* reads a vector of the required interrupt (INT 5h) */
+			#elif _M_AMD64
+				idt += (Interrupt*16)+4; /* reads a vector of the required interrupt (INT 5h) */
+			#else
+				#error unsupported architecture
+			#endif
 
-			oldInt5 = MAKEDWORD(*(WORD *)(idt - 4), *(WORD *)(idt + 2));/* reads an address of the old service of the required interrupt (INT 5h) */
+			#ifdef _M_IX86
+				oldInt5 = MAKEDWORD(*(WORD *)(idt - 4), *(WORD *)(idt + 2));/* reads an address of the old service of the required interrupt (INT 5h) */
+			#elif _M_AMD64
+				oldInt5 = MAKEDWORD64(*(WORD *)(idt - 4), *(WORD *)(idt + 2), *(DWORD *)(idt + 4));/* reads an address of the old service of the required interrupt (INT 5h) */
+			#else
+				#error unsupported architecture
+			#endif
 
 			newInt5 = (void *)ring0InstallIFSHookUnicode;
-			*(WORD *)(idt - 4) = LOWORD((DWORD)newInt5);
-			*(WORD *)(idt + 2) = HIWORD((DWORD)newInt5);
+			#ifdef _M_IX86
+				*(WORD *)(idt - 4) = LOWORD((DWORD)newInt5);
+				*(WORD *)(idt + 2) = HIWORD((DWORD)newInt5);
+			#elif _M_AMD64
+				*(WORD *)(idt - 4) = LOWORD(LODWORD((ULONGLONG)newInt5));
+				*(WORD *)(idt + 2) = HIWORD(LODWORD((ULONGLONG)newInt5));
+				*(DWORD *)(idt + 4) = HIDWORD((ULONGLONG)newInt5);
+			#else
+				#error unsupported architecture
+			#endif
 
 			fileSystemApiHandle = handleBuf;
 
@@ -2714,8 +3676,16 @@ class GetWindowsFchmodFuncs
 			}
 
 			newInt5 = (void *)ring0UninstallIFSFileHookUnicode;
-			*(WORD *)(idt - 4) = LOWORD((DWORD)newInt5);
-			*(WORD *)(idt + 2) = HIWORD((DWORD)newInt5);
+			#ifdef _M_IX86
+				*(WORD *)(idt - 4) = LOWORD((DWORD)newInt5);
+				*(WORD *)(idt + 2) = HIWORD((DWORD)newInt5);
+			#elif _M_AMD64
+				*(WORD *)(idt - 4) = LOWORD(LODWORD((ULONGLONG)newInt5));
+				*(WORD *)(idt + 2) = HIWORD(LODWORD((ULONGLONG)newInt5));
+				*(DWORD *)(idt + 4) = HIDWORD((ULONGLONG)newInt5);
+			#else
+				#error unsupported architecture
+			#endif
 
 			/* jump into Ring0 (the newly defined service INT 5h) */
 			#if _MSC_VER
@@ -2731,8 +3701,16 @@ class GetWindowsFchmodFuncs
 			#endif
 
 			/* restores int 5h */
-			*(WORD *)(idt - 4) = LOWORD((DWORD)oldInt5);
-			*(WORD *)(idt + 2) = HIWORD((DWORD)oldInt5);
+			#ifdef _M_IX86
+				*(WORD *)(idt - 4) = LOWORD((DWORD)oldInt5);
+				*(WORD *)(idt + 2) = HIWORD((DWORD)oldInt5);
+			#elif _M_AMD64
+				*(WORD *)(idt - 4) = LOWORD(LODWORD((ULONGLONG)oldInt5));
+				*(WORD *)(idt + 2) = HIWORD(LODWORD((ULONGLONG)oldInt5));
+				*(DWORD *)(idt + 4) = HIDWORD((ULONGLONG)oldInt5);
+			#else
+				#error unsupported architecture
+			#endif
 
 			LeaveCriticalSection(&csring0ExtendedHandleToPath);
 
@@ -2741,7 +3719,13 @@ class GetWindowsFchmodFuncs
 
 		static BOOL getRing0Handle(DWORD extendedFileHandle, PVOID *pHandleBuf, PDWORD pFilePos)
 		{
-			DWORD idt;
+			#ifdef _M_IX86
+				DWORD idt;
+			#elif _M_AMD64
+				ULONGLONG idt;
+			#else
+				#error unsupported architecture
+			#endif
 			DWORD oldInt5;
 			void *newInt5;
 			BOOL success = FALSE;
@@ -2758,28 +3742,41 @@ class GetWindowsFchmodFuncs
 			getRing0HandleHookpHandleBuf = pHandleBuf;
 			getRing0HandleHookpFilePos = pFilePos;
 
-			#if _MSC_VER
-			_asm push edx
-			_asm sidt [esp-2] ;reads IDT into the stack
-			_asm pop edx
-			_asm mov idt, edx
+			#ifdef _M_IX86
+				idt = (DWORD)getIDT();
+			#elif _M_AMD64
+				idt = (ULONGLONG)getIDT();
 			#else
-			__asm__ volatile(
-				"pushl %%edx\n\t"
-				"sidt -2(%%esp) #reads IDT into the stack\n\t"
-				"popl %%edx\n\t"
-				"movl %%edx, %0\n\t"
-				: "=m" (idt)
-			);
+				#error unsupported architecture
 			#endif
 
-			idt += (Interrupt*8)+4; // reads a vector of the required interrupt (INT 5h)
+			#ifdef _M_IX86
+				idt += (Interrupt*8)+4; /* reads a vector of the required interrupt (INT 5h) */
+			#elif _M_AMD64
+				idt += (Interrupt*16)+4; /* reads a vector of the required interrupt (INT 5h) */
+			#else
+				#error unsupported architecture
+			#endif
 
-			oldInt5 = MAKEDWORD(*(WORD *)(idt - 4), *(WORD *)(idt + 2)); // reads an address of the old service of the required interrupt (INT 5h)
+			#ifdef _M_IX86
+				oldInt5 = MAKEDWORD(*(WORD *)(idt - 4), *(WORD *)(idt + 2));/* reads an address of the old service of the required interrupt (INT 5h) */
+			#elif _M_AMD64
+				oldInt5 = MAKEDWORD64(*(WORD *)(idt - 4), *(WORD *)(idt + 2), *(DWORD *)(idt + 4));/* reads an address of the old service of the required interrupt (INT 5h) */
+			#else
+				#error unsupported architecture
+			#endif
 
 			newInt5 = (void *)getRing0HandleHook;
-			*(WORD *)(idt - 4) = LOWORD((DWORD)newInt5);
-			*(WORD *)(idt + 2) = HIWORD((DWORD)newInt5);
+			#ifdef _M_IX86
+				*(WORD *)(idt - 4) = LOWORD((DWORD)newInt5);
+				*(WORD *)(idt + 2) = HIWORD((DWORD)newInt5);
+			#elif _M_AMD64
+				*(WORD *)(idt - 4) = LOWORD(LODWORD((ULONGLONG)newInt5));
+				*(WORD *)(idt + 2) = HIWORD(LODWORD((ULONGLONG)newInt5));
+				*(DWORD *)(idt + 4) = HIDWORD((ULONGLONG)newInt5);
+			#else
+				#error unsupported architecture
+			#endif
 
 			// jump into Ring0 (the newly defined service INT 5h)
 			#if _MSC_VER
@@ -2795,8 +3792,16 @@ class GetWindowsFchmodFuncs
 			#endif
 
 			// restores int 5h
-			*(WORD *)(idt - 4) = LOWORD((DWORD)oldInt5);
-			*(WORD *)(idt + 2) = HIWORD((DWORD)oldInt5);
+			#ifdef _M_IX86
+				*(WORD *)(idt - 4) = LOWORD((DWORD)oldInt5);
+				*(WORD *)(idt + 2) = HIWORD((DWORD)oldInt5);
+			#elif _M_AMD64
+				*(WORD *)(idt - 4) = LOWORD(LODWORD((ULONGLONG)oldInt5));
+				*(WORD *)(idt + 2) = HIWORD(LODWORD((ULONGLONG)oldInt5));
+				*(DWORD *)(idt + 4) = HIDWORD((ULONGLONG)oldInt5);
+			#else
+				#error unsupported architecture
+			#endif
 
 			LeaveCriticalSection(&csgetRing0Handle);
 
@@ -2806,7 +3811,13 @@ class GetWindowsFchmodFuncs
 		static PK32OBJBASE Win32HandleToK32Object(HANDLE fh)
 		{
 			PK32OBJBASE ret = NULL;
+			#ifdef _M_IX86
 			DWORD idx = (DWORD)fh;
+			#elif _M_AMD64
+			ULONGLONG idx = (ULONGLONG)fh;
+			#else
+				#error unsupported architecture
+			#endif
 
 			if(fh && fh != INVALID_HANDLE_VALUE)
 			{
@@ -3503,15 +4514,33 @@ class GetWindowsFchmodFuncs
 					{
 						if(OSWin95)
 						{
-							pTdb = (PTHREAD_DATABASE)((DWORD)pTib - offsetof(struct _TDB95, tib));
+							#ifdef _M_IX86
+								pTdb = (PTHREAD_DATABASE)((DWORD)pTib - offsetof(struct _TDB95, tib));
+							#elif _M_AMD64
+								pTdb = (PTHREAD_DATABASE)((ULONGLONG)pTib - offsetof(struct _TDB95, tib));
+							#else
+								#error unsupported architecture
+							#endif
 						}
 						else if(OSWin98)
 						{
+							#ifdef _M_IX86
 							pTdb = (PTHREAD_DATABASE)((DWORD)pTib - offsetof(struct _TDB98, tib));
+							#elif _M_AMD64
+							pTdb = (PTHREAD_DATABASE)((ULONGLONG)pTib - offsetof(struct _TDB98, tib));
+							#else
+								#error unsupported architecture
+							#endif
 						}
 						else if(OSWinME)
 						{
+							#ifdef _M_IX86
 							pTdb = (PTHREAD_DATABASE)((DWORD)pTib - offsetof(struct _TDBME, tib));
+							#elif _M_AMD64
+							pTdb = (PTHREAD_DATABASE)((ULONGLONG)pTib - offsetof(struct _TDBME, tib));
+							#else
+								#error unsupported architecture
+							#endif
 						}
 						else
 						{
@@ -3521,14 +4550,28 @@ class GetWindowsFchmodFuncs
 
 					if(pTdb)
 					{
-						DWORD tid = GetCurrentThreadId();
-						obsfucator = ((DWORD)pTdb ^ tid);
+						#ifdef _M_IX86
+							DWORD tid = GetCurrentThreadId();
+							obsfucator = ((DWORD)pTdb ^ tid);
+						#elif _M_AMD64
+							ULONGLONG tid = GetCurrentThreadId();
+							obsfucator = ((ULONGLONG)pTdb ^ tid);
+						#else
+							#error unsupported architecture
+						#endif
 					}
 
 					if(pTdb && obsfucator)
 					{
+						#ifdef _M_IX86
 						DWORD pid = GetCurrentProcessId();
 						pPdb = (PPROCESS_DATABASE)(pid ^ obsfucator);
+						#elif _M_AMD64
+						ULONGLONG pid = GetCurrentProcessId();
+						pPdb = (PPROCESS_DATABASE)(pid ^ obsfucator);
+						#else
+							#error unsupported architecture
+						#endif
 					}
 				}
 			}
@@ -4058,7 +5101,13 @@ BOOL GetWindowsFchmodFuncs::OSWin98 = FALSE;
 BOOL GetWindowsFchmodFuncs::OSWinME = FALSE;
 CRITICAL_SECTION GetWindowsFchmodFuncs::csgetRing0Handle;
 CRITICAL_SECTION GetWindowsFchmodFuncs::csring0ExtendedHandleToPath;
+#ifdef _M_IX86
 DWORD GetWindowsFchmodFuncs::obsfucator = 0;
+#elif _M_AMD64
+ULONGLONG GetWindowsFchmodFuncs::obsfucator = 0;
+#else
+	#error unsupported architecture
+#endif
 PTIB GetWindowsFchmodFuncs::pTib = NULL;
 PTHREAD_DATABASE GetWindowsFchmodFuncs::pTdb = NULL;
 PPROCESS_DATABASE GetWindowsFchmodFuncs::pPdb = NULL;
